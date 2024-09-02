@@ -68,6 +68,10 @@ const routes: Routes = [
         ]
       }] : []),
       {
+        path: 'stratum',
+        component: StratumList,
+      },
+      {
         path: 'terms-of-service',
         loadChildren: () => import('@components/terms-of-service/terms-of-service.module').then(m => m.TermsOfServiceModule),
       },
