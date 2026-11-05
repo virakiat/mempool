@@ -4,18 +4,24 @@ import config from '../config';
 import DB from '../database';
 import logger from '../logger';
 import { PoolInfo, PoolTag } from '../mempool.interfaces';
+import { PoolConnection } from 'mysql2/promise';
+
+// Intervals the pools stats cache is built for. 'all' has no time filter; the rest resolve via Common.getSqlInterval
+export const POOLS_STATS_INTERVALS = ['24h', '3d', '1w', '1m', '3m', '6m', '1y', '2y', '3y', '4y', 'all'];
 
 class PoolsRepository {
   /**
    * Get all pools tagging info
+   * @asyncUnsafe
    */
-  public async $getPools(): Promise<PoolTag[]> {
-    const [rows] = await DB.query('SELECT id, unique_id as uniqueId, name, addresses, regexes, slug FROM pools');
+  public async $getPools(connection?: PoolConnection): Promise<PoolTag[]> {
+    const [rows] = await DB.query('SELECT id, unique_id as uniqueId, name, addresses, regexes, slug FROM pools', undefined, 'debug', connection);
     return <PoolTag[]>rows;
   }
 
   /**
    * Get unknown pool tagging info
+   * @asyncUnsafe
    */
   public async $getUnknownPool(): Promise<PoolTag> {
     let [rows]: any[] = await DB.query('SELECT id, unique_id as uniqueId, name, slug FROM pools where name = "Unknown"');
@@ -28,6 +34,7 @@ class PoolsRepository {
 
   /**
    * Get basic pool info and block count
+   * @asyncSafe
    */
   public async $getPoolsInfo(interval: string | null = null): Promise<PoolInfo[]> {
     interval = Common.getSqlInterval(interval);
@@ -35,6 +42,7 @@ class PoolsRepository {
     let query = `
       SELECT
         COUNT(blocks.height) As blockCount,
+          COUNT(CASE WHEN blocks.tx_count = 1 THEN 1 END) AS emptyBlocks,
           pool_id AS poolId,
           pools.name AS name,
           pools.link AS link,
@@ -44,11 +52,12 @@ class PoolsRepository {
           unique_id as poolUniqueId
       FROM blocks
       JOIN pools on pools.id = pool_id
-      LEFT JOIN blocks_audits ON blocks_audits.height = blocks.height
+      LEFT JOIN blocks_audits ON blocks_audits.hash = blocks.hash
+      WHERE blocks.stale = 0
     `;
 
     if (interval) {
-      query += ` WHERE blocks.blockTimestamp BETWEEN DATE_SUB(NOW(), INTERVAL ${interval}) AND NOW()`;
+      query += ` AND blocks.blockTimestamp BETWEEN DATE_SUB(NOW(), INTERVAL ${interval}) AND NOW()`;
     }
 
     query += ` GROUP BY pool_id
@@ -63,13 +72,81 @@ class PoolsRepository {
     }
   }
 
+  /** @asyncUnsafe */
+  public async $getPoolsInfoPerInterval(): Promise<Record<string, PoolInfo[]>> {
+    const feeDelta = `(CAST(blocks.fees as SIGNED) - CAST(blocks_audits.expected_fees as SIGNED)) / NULLIF(CAST(blocks_audits.expected_fees as SIGNED), 0)`;
+    const columns = POOLS_STATS_INTERVALS.map((label) => {
+      const sql = Common.getSqlInterval(label);
+      const inWindow = sql ? `blocks.blockTimestamp BETWEEN DATE_SUB(NOW(), INTERVAL ${sql}) AND NOW()` : '1';
+      return `
+        COUNT(CASE WHEN ${inWindow} THEN blocks.height END) AS \`blockCount_${label}\`,
+        COUNT(CASE WHEN ${inWindow} AND blocks.tx_count = 1 THEN 1 END) AS \`emptyBlocks_${label}\`,
+        AVG(CASE WHEN ${inWindow} THEN blocks_audits.match_rate END) AS \`avgMatchRate_${label}\`,
+        AVG(CASE WHEN ${inWindow} THEN ${feeDelta} END) AS \`avgFeeDelta_${label}\``;
+    }).join(',');
+
+    const query = `SELECT
+        pool_id AS poolId,
+        pools.name AS name,
+        pools.link AS link,
+        pools.slug AS slug,
+        pools.unique_id AS poolUniqueId,
+        ${columns}
+      FROM blocks
+      JOIN pools on pools.id = pool_id
+      LEFT JOIN blocks_audits ON blocks_audits.hash = blocks.hash
+      WHERE blocks.stale = 0
+      GROUP BY pool_id`;
+
+    try {
+      const [rows]: any[] = await DB.query(query);
+
+      // every interval needs an array even with no rows, or callers iterate undefined
+      const result: Record<string, PoolInfo[]> = {};
+      for (const label of POOLS_STATS_INTERVALS) {
+        result[label] = [];
+      }
+
+      for (const row of rows) {
+        for (const label of POOLS_STATS_INTERVALS) {
+          const blockCount = row[`blockCount_${label}`];
+          if (blockCount > 0) {
+            result[label].push({
+              poolId: row.poolId,
+              name: row.name,
+              link: row.link,
+              slug: row.slug,
+              poolUniqueId: row.poolUniqueId,
+              blockCount: blockCount,
+              emptyBlocks: row[`emptyBlocks_${label}`],
+              avgMatchRate: row[`avgMatchRate_${label}`],
+              avgFeeDelta: row[`avgFeeDelta_${label}`],
+            });
+          }
+        }
+      }
+
+      // rank is assigned from this order, and unique_id breaks ties so it stays stable across rebuilds
+      for (const pools of Object.values(result)) {
+        pools.sort((a, b) => b.blockCount - a.blockCount || a.poolUniqueId - b.poolUniqueId);
+      }
+
+      return result;
+    } catch(e) {
+      logger.err(`Cannot generate pools stats per interval. Reason: ` + (e instanceof Error ? e.message : e));
+      throw e;
+    }
+  }
+
   /**
    * Get basic pool info and block count between two timestamp
+   * @asyncSafe
    */
   public async $getPoolsInfoBetween(from: number, to: number): Promise<PoolInfo[]> {
     const query = `SELECT COUNT(height) as blockCount, pools.id as poolId, pools.name as poolName
       FROM pools
       LEFT JOIN blocks on pools.id = blocks.pool_id AND blocks.blockTimestamp BETWEEN FROM_UNIXTIME(?) AND FROM_UNIXTIME(?)
+      WHERE blocks.stale = 0
       GROUP BY pools.id`;
 
     try {
@@ -83,6 +160,7 @@ class PoolsRepository {
 
   /**
    * Get a mining pool info
+   * @asyncSafe
    */
   public async $getPool(slug: string, parse: boolean = true): Promise<PoolTag | null> {
     const query = `
@@ -100,7 +178,7 @@ class PoolsRepository {
       if (parse) {
         rows[0].regexes = JSON.parse(rows[0].regexes);
       }
-      if (['testnet', 'signet'].includes(config.MEMPOOL.NETWORK)) {
+      if (['testnet', 'signet', 'testnet4', 'regtest'].includes(config.MEMPOOL.NETWORK)) {
         rows[0].addresses = []; // pools-v2.json only contains mainnet addresses
       } else if (parse) {
         rows[0].addresses = JSON.parse(rows[0].addresses);
@@ -115,6 +193,7 @@ class PoolsRepository {
 
   /**
    * Get a mining pool info by its unique id
+   * @asyncSafe
    */
   public async $getPoolByUniqueId(id: number, parse: boolean = true): Promise<PoolTag | null> {
     const query = `
@@ -132,7 +211,7 @@ class PoolsRepository {
       if (parse) {
         rows[0].regexes = JSON.parse(rows[0].regexes);
       }
-      if (['testnet', 'signet'].includes(config.MEMPOOL.NETWORK)) {
+      if (['testnet', 'signet', 'testnet4', 'regtest'].includes(config.MEMPOOL.NETWORK)) {
         rows[0].addresses = []; // pools.json only contains mainnet addresses
       } else if (parse) {
         rows[0].addresses = JSON.parse(rows[0].addresses);
@@ -147,78 +226,86 @@ class PoolsRepository {
 
   /**
    * Insert a new mining pool in the database
-   * 
-   * @param pool 
+   *
+   * @param pool
+   * @asyncUnsafe
    */
-  public async $insertNewMiningPool(pool: any, slug: string): Promise<void> {
+  public async $insertNewMiningPool(pool: any, slug: string, connection?: PoolConnection): Promise<void> {
     try {
       await DB.query(`
         INSERT INTO pools
         SET name = ?, link = ?, addresses = ?, regexes = ?, slug = ?, unique_id = ?`,
-        [pool.name, pool.link, JSON.stringify(pool.addresses), JSON.stringify(pool.regexes), slug, pool.id]
+        [pool.name, pool.link, JSON.stringify(pool.addresses), JSON.stringify(pool.regexes), slug, pool.id], 'debug', connection
       );
     } catch (e: any) {
       logger.err(`Cannot insert new mining pool into db. Reason: ` + (e instanceof Error ? e.message : e));
+      throw e;
     }
   }
 
   /**
    * Rename an existing mining pool
-   * 
+   *
    * @param dbId
    * @param newSlug
-   * @param newName 
+   * @param newName
+   * @asyncUnsafe
    */
-  public async $renameMiningPool(dbId: number, newSlug: string, newName: string): Promise<void> {
+  public async $renameMiningPool(dbId: number, newSlug: string, newName: string, connection?: PoolConnection): Promise<void> {
     try {
       await DB.query(`
         UPDATE pools
         SET slug = ?, name = ?
         WHERE id = ?`,
-        [newSlug, newName, dbId]
+        [newSlug, newName, dbId], 'debug', connection
       );
     } catch (e: any) {
       logger.err(`Cannot rename mining pool id ${dbId}. Reason: ` + (e instanceof Error ? e.message : e));
+      throw e;
     }
   }
 
   /**
    * Update an exisiting mining pool link
-   * 
-   * @param dbId 
-   * @param newLink 
+   *
+   * @param dbId
+   * @param newLink
+   * @asyncUnsafe
    */
-  public async $updateMiningPoolLink(dbId: number, newLink: string): Promise<void> {
+  public async $updateMiningPoolLink(dbId: number, newLink: string, connection?: PoolConnection): Promise<void> {
     try {
       await DB.query(`
         UPDATE pools
         SET link = ?
         WHERE id = ?`,
-        [newLink, dbId]
+        [newLink, dbId], 'debug', connection
       );
     } catch (e: any) {
       logger.err(`Cannot update link for mining pool id ${dbId}. Reason: ` + (e instanceof Error ? e.message : e));
+      throw e;
     }
 
   }
 
   /**
    * Update an existing mining pool addresses or coinbase tags
-   * 
-   * @param dbId 
-   * @param addresses 
-   * @param regexes 
+   *
+   * @param dbId
+   * @param addresses
+   * @param regexes
+   * @asyncUnsafe
    */
-  public async $updateMiningPoolTags(dbId: number, addresses: string, regexes: string): Promise<void> {
+  public async $updateMiningPoolTags(dbId: number, addresses: string, regexes: string, connection?: PoolConnection): Promise<void> {
     try {
       await DB.query(`
         UPDATE pools
         SET addresses = ?, regexes = ?
         WHERE id = ?`,
-        [JSON.stringify(addresses), JSON.stringify(regexes), dbId]
+        [JSON.stringify(addresses), JSON.stringify(regexes), dbId], 'debug', connection
       );
     } catch (e: any) {
       logger.err(`Cannot update mining pool id ${dbId}. Reason: ` + (e instanceof Error ? e.message : e));
+      throw e;
     }
   }
 

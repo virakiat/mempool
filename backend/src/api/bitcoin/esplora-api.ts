@@ -1,12 +1,14 @@
 import config from '../../config';
-import axios, { AxiosResponse, isAxiosError } from 'axios';
+import axios, { isAxiosError } from 'axios';
 import http from 'http';
+import https from 'https';
 import { AbstractBitcoinApi, HealthCheckHost } from './bitcoin-api-abstract-factory';
 import { IEsploraApi } from './esplora-api.interface';
 import logger from '../../logger';
 import { Common } from '../common';
 import { SubmitPackageResult, TestMempoolAcceptResult } from './bitcoin-api.interface';
-
+import os from 'os';
+import { bitcoinCoreApi } from './bitcoin-api-factory';
 interface FailoverHost {
   host: string,
   rtts: number[],
@@ -20,23 +22,46 @@ interface FailoverHost {
   preferred?: boolean,
   checked: boolean,
   lastChecked?: number,
+  publicDomain: string,
+  hashes: {
+    frontend?: string,
+    hybrid?: string,
+    backend?: string,
+    electrs?: string,
+    ssr?: string,
+    core?: string,
+    os?: string,
+    lastUpdated: number,
+  },
+  liquidAudit?: {
+    pegRatio: number,
+    bitcoinLastBlockUpdate: number,
+    liquidLastBlockUpdate: number,
+  }
 }
 
 class FailoverRouter {
   activeHost: FailoverHost;
   fallbackHost: FailoverHost;
-  maxSlippage: number = config.ESPLORA.MAX_BEHIND_TIP ?? 2;
+  maxSlippage: number = config.ESPLORA.MAX_BEHIND_TIP ?? (Common.isLiquid() ? 8 : 2);
   maxHeight: number = 0;
   hosts: FailoverHost[];
   multihost: boolean;
-  pollInterval: number = 60000;
+  gitHashInterval: number = 60000; // 1 minute
+  pollInterval: number = 60000; // 1 minute
   pollTimer: NodeJS.Timeout | null = null;
   pollConnection = axios.create();
+  localHostname: string = 'localhost';
   requestConnection = axios.create({
     httpAgent: new http.Agent({ keepAlive: true })
   });
 
   constructor() {
+    try {
+      this.localHostname = os.hostname();
+    } catch (e) {
+      logger.warn('Failed to set local hostname, using "localhost"');
+    }
     // setup list of hosts
     this.hosts = (config.ESPLORA.FALLBACK || []).map(domain => {
       return {
@@ -45,6 +70,10 @@ class FailoverRouter {
         rtts: [],
         rtt: Infinity,
         failures: 0,
+        publicDomain: 'https://' + this.extractPublicDomain(domain),
+        hashes: {
+          lastUpdated: 0,
+        },
       };
     });
     this.activeHost = {
@@ -55,6 +84,10 @@ class FailoverRouter {
       socket: !!config.ESPLORA.UNIX_SOCKET_PATH,
       preferred: true,
       checked: false,
+      publicDomain: `http://${this.localHostname}`,
+      hashes: {
+        lastUpdated: 0,
+      },
     };
     this.fallbackHost = this.activeHost;
     this.hosts.unshift(this.activeHost);
@@ -73,11 +106,12 @@ class FailoverRouter {
     });
 
     if (this.multihost) {
-      this.pollHosts();
+      void this.pollHosts();
     }
   }
 
   // start polling hosts to measure availability & rtt
+  /** @asyncSafe */
   private async pollHosts(): Promise<void> {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
@@ -89,7 +123,7 @@ class FailoverRouter {
     for (const host of this.hosts) {
       try {
         const result = await (host.socket
-          ? this.pollConnection.get<number>('/blocks/tip/height', { socketPath: host.host, timeout: config.ESPLORA.FALLBACK_TIMEOUT })
+          ? this.pollConnection.get<number>('http://api/blocks/tip/height', { socketPath: host.host, timeout: config.ESPLORA.FALLBACK_TIMEOUT })
           : this.pollConnection.get<number>(host.host + '/blocks/tip/height', { timeout: config.ESPLORA.FALLBACK_TIMEOUT })
         );
         if (result) {
@@ -106,6 +140,28 @@ class FailoverRouter {
             host.outOfSync = false;
           }
           host.unreachable = false;
+
+          // update esplora git hash using the x-powered-by header from the height check
+          const poweredBy = result.headers['x-powered-by'];
+          if (poweredBy) {
+            const match = poweredBy.match(/([a-fA-F0-9]{5,40})/);
+            if (match && match[1]?.length) {
+              host.hashes.electrs = match[1];
+            }
+          }
+
+          await this.$updateLiquidAudit(host);
+
+          // Check front and backend git hashes less often
+          if (Date.now() - host.hashes.lastUpdated > this.gitHashInterval) {
+            await Promise.all([
+              this.$updateFrontendGitHash(host),
+              this.$updateBackendVersions(host),
+              this.$updateSSRGitHash(host),
+              config.MEMPOOL.OFFICIAL ? this.$updateHybridGitHash(host) : Promise.resolve(),
+            ]);
+            host.hashes.lastUpdated = Date.now();
+          }
         } else {
           host.outOfSync = true;
           host.unreachable = true;
@@ -147,7 +203,7 @@ class FailoverRouter {
 
     const elapsed = Date.now() - start;
 
-    this.pollTimer = setTimeout(() => { this.pollHosts(); }, Math.max(1, this.pollInterval - elapsed));
+    this.pollTimer = setTimeout(() => { void this.pollHosts(); }, Math.max(1, this.pollInterval - elapsed));
   }
 
   private formatRanking(index: number, host: FailoverHost, active: FailoverHost, maxHeight: number): string {
@@ -202,12 +258,164 @@ class FailoverRouter {
     }
   }
 
+  // methods for retrieving git hashes by host
+  private async $updateFrontendGitHash(host: FailoverHost): Promise<void> {
+    try {
+      const url = `${host.publicDomain}/resources/config.js`;
+      const response = await this.pollConnection.get<string>(
+        url, {
+          timeout: config.ESPLORA.FALLBACK_TIMEOUT,
+          headers: Common.isLiquid() ? { 'Host': 'liquid.network' } : undefined
+        }
+      );
+      const match = response.data.match(/GIT_COMMIT_HASH\s*=\s*['"](.*?)['"]/);
+      if (match && match[1]?.length) {
+        host.hashes.frontend = match[1];
+      }
+      const hybridMatch = response.data.match(/GIT_COMMIT_HASH_MEMPOOL_SPACE\s*=\s*['"](.*?)['"]/);
+      if (hybridMatch && hybridMatch[1]?.length) {
+        host.hashes.hybrid = hybridMatch[1];
+      }
+    } catch (e) {
+      // failed to get frontend build hash - do nothing
+    }
+  }
+
+  private async $updateHybridGitHash(host: FailoverHost): Promise<void> {
+    try {
+      const response: string = await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: host.publicDomain.replace('https://', '').replace('http://', ''),
+          port: 443,
+          path: '/en-US/resources/config.js',
+          method: 'GET',
+          headers: {
+            'Host': Common.isLiquid() ? 'liquid.network' : 'mempool.space'
+          },
+          timeout: config.ESPLORA.FALLBACK_TIMEOUT,
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              resolve(data);
+            } else {
+              reject(new Error(`Failed to get hybrid git hash: ${res.statusCode}`));
+            }
+          });
+        });
+        req.on('error', (e) => {
+          reject(e);
+        });
+        req.end();
+      });
+      const match = response.match(/GIT_COMMIT_HASH_MEMPOOL_SPACE\s*=\s*['"](.*?)['"]/);
+      if (match && match[1]?.length) {
+        host.hashes.hybrid = match[1];
+      }
+    } catch (e) {
+      // failed to get frontend build hash - do nothing
+    }
+  }
+
+  private async $updateBackendVersions(host: FailoverHost): Promise<void> {
+    try {
+      const url = `${host.publicDomain}/api/v1/backend-info`;
+      const response = await this.pollConnection.get<any>(
+        url, {
+          timeout: config.ESPLORA.FALLBACK_TIMEOUT,
+          headers: Common.isLiquid() ? { 'Host': 'liquid.network' } : undefined
+        }
+      );
+      if (response.data?.gitCommit) {
+        host.hashes.backend = response.data.gitCommit;
+      }
+      if (response.data?.coreVersion) {
+        host.hashes.core = response.data.coreVersion;
+      }
+      if (response.data?.osVersion) {
+        host.hashes.os = response.data.osVersion;
+      }
+    } catch (e) {
+      // failed to get backend build hash - do nothing
+    }
+  }
+
+  private async $updateSSRGitHash(host: FailoverHost): Promise<void> {
+    try {
+      const url = `${host.publicDomain}/ssr/api/status`;
+      const response = await this.pollConnection.get<any>(
+        url, {
+          timeout: config.ESPLORA.FALLBACK_TIMEOUT,
+          headers: Common.isLiquid() ? { 'Host': 'liquid.network' } : undefined
+        }
+      );
+      if (response.data?.gitHash) {
+        host.hashes.ssr = response.data.gitHash;
+      }
+    } catch (e) {
+      // failed to get ssr build hash - do nothing
+    }
+  }
+
+  private async $updateLiquidAudit(host: FailoverHost): Promise<void> {
+    if (config.MEMPOOL.NETWORK !== 'liquid') {
+      return;
+    }
+    try {
+      const [reservesResponse, pegsResponse] = await Promise.all([
+        this.pollConnection.get<any>(
+          `${host.publicDomain}/api/v1/liquid/reserves`, {
+            timeout: config.ESPLORA.FALLBACK_TIMEOUT,
+            headers: { 'Host': 'liquid.network' }
+          }
+        ),
+        this.pollConnection.get<any>(
+          `${host.publicDomain}/api/v1/liquid/pegs`, {
+            timeout: config.ESPLORA.FALLBACK_TIMEOUT,
+            headers: { 'Host': 'liquid.network' }
+          }
+        ),
+      ]);
+
+      const reservesAmount = Number(reservesResponse.data?.amount);
+      const pegsAmount = Number(pegsResponse.data?.amount);
+      const bitcoinLastBlockUpdate = Number(reservesResponse.data?.lastBlockUpdate);
+      const liquidLastBlockUpdate = Number(pegsResponse.data?.lastBlockUpdate);
+
+      if (Number.isFinite(reservesAmount) && Number.isFinite(pegsAmount) && Number.isFinite(bitcoinLastBlockUpdate) && Number.isFinite(liquidLastBlockUpdate) && pegsAmount > 0) {
+        host.liquidAudit = {
+          pegRatio: (reservesAmount / pegsAmount) * 100,
+          bitcoinLastBlockUpdate,
+          liquidLastBlockUpdate,
+        };
+      }
+    } catch (e) {
+      // failed to get liquid audit values - do nothing
+    }
+  }
+
+  // returns the public mempool domain corresponding to an esplora server url
+  // (a bit of a hack to avoid manually specifying frontend & backend URLs for each esplora server)
+  private extractPublicDomain(url: string): string {
+    // force the url to start with a valid protocol
+    const urlWithProtocol = url.startsWith('http') ? url : `https://${url}`;
+    // parse as URL and extract the hostname
+    try {
+      const parsed = new URL(urlWithProtocol);
+      return parsed.hostname;
+    } catch (e) {
+      // fallback to the original url
+      return url;
+    }
+  }
+
   private async $query<T>(method: 'get'| 'post', path, data: any, responseType = 'json', host = this.activeHost, retry: boolean = true): Promise<T> {
     let axiosConfig;
     let url;
     if (host.socket) {
       axiosConfig = { socketPath: host.host, timeout: config.ESPLORA.REQUEST_TIMEOUT, responseType };
-      url = path;
+      url = 'http://api' + path;
     } else {
       axiosConfig = { timeout: config.ESPLORA.REQUEST_TIMEOUT, responseType };
       url = host.host + path;
@@ -271,6 +479,10 @@ class ElectrsApi implements AbstractBitcoinApi {
     return this.failoverRouter.$get<string>('/tx/' + txId + '/hex');
   }
 
+  $getTransactionMerkleProof(txId: string): Promise<IEsploraApi.MerkleProof> {
+    return this.failoverRouter.$get<IEsploraApi.MerkleProof>('/tx/' + txId + '/merkle-proof');
+  }
+
   $getBlockHeightTip(): Promise<number> {
     return this.failoverRouter.$get<number>('/blocks/tip/height');
   }
@@ -279,12 +491,38 @@ class ElectrsApi implements AbstractBitcoinApi {
     return this.failoverRouter.$get<string>('/blocks/tip/hash');
   }
 
-  $getTxIdsForBlock(hash: string): Promise<string[]> {
-    return this.failoverRouter.$get<string[]>('/block/' + hash + '/txids');
+  /** @asyncUnsafe */
+  async $getTxIdsForBlock(hash: string, fallbackToCore = false): Promise<string[]> {
+    try {
+      const txids = await this.failoverRouter.$get<string[]>('/block/' + hash + '/txids');
+      return txids;
+    } catch (e) {
+      if (fallbackToCore && isAxiosError(e) && e.response?.status === 404) {
+        // might be a stale block, see if Core has it?
+        const coreBlock = await bitcoinCoreApi.$getBlock(hash);
+        if (coreBlock?.stale) {
+          return bitcoinCoreApi.$getTxIdsForBlock(hash);
+        }
+      }
+      throw e;
+    }
   }
 
-  $getTxsForBlock(hash: string): Promise<IEsploraApi.Transaction[]> {
-    return this.failoverRouter.$get<IEsploraApi.Transaction[]>('/internal/block/' + hash + '/txs');
+  /** @asyncUnsafe */
+  async $getTxsForBlock(hash: string, fallbackToCore = false): Promise<IEsploraApi.Transaction[]> {
+    try {
+      const txs = await this.failoverRouter.$get<IEsploraApi.Transaction[]>('/internal/block/' + hash + '/txs');
+      return txs;
+    } catch (e) {
+      if (fallbackToCore && isAxiosError(e) && e.response?.status === 404) {
+        // might be a stale block, see if Core has it?
+        const coreBlock = await bitcoinCoreApi.$getBlock(hash);
+        if (coreBlock?.stale) {
+          return bitcoinCoreApi.$getTxsForBlock(hash);
+        }
+      }
+      throw e;
+    }
   }
 
   $getBlockHash(height: number): Promise<string> {
@@ -312,12 +550,20 @@ class ElectrsApi implements AbstractBitcoinApi {
     throw new Error('Method getAddressTransactions not implemented.');
   }
 
+  $getAddressUtxos(address: string): Promise<IEsploraApi.UTXO[]> {
+    return this.failoverRouter.$get<IEsploraApi.UTXO[]>('/address/' + address + '/utxo');
+  }
+
   $getScriptHash(scripthash: string): Promise<IEsploraApi.ScriptHash> {
     throw new Error('Method getScriptHash not implemented.');
   }
 
   $getScriptHashTransactions(scripthash: string, txId?: string): Promise<IEsploraApi.Transaction[]> {
     throw new Error('Method getScriptHashTransactions not implemented.');
+  }
+
+  $getScriptHashUtxos(scripthash: string): Promise<IEsploraApi.UTXO[]> {
+    throw new Error('Method getScriptHashUtxos not implemented.');
   }
 
   $getAddressPrefix(prefix: string): string[] {
@@ -356,6 +602,7 @@ class ElectrsApi implements AbstractBitcoinApi {
     return this.failoverRouter.$post<IEsploraApi.Outspend[]>('/internal/txs/outspends/by-outpoint', outpoints.map(out => `${out.txid}:${out.vout}`), 'json');
   }
 
+  /** @asyncUnsafe */
   async $getCoinbaseTx(blockhash: string): Promise<IEsploraApi.Transaction> {
     const txid = await this.failoverRouter.$get<string>(`/block/${blockhash}/txid/0`);
     return this.failoverRouter.$get<IEsploraApi.Transaction>('/tx/' + txid);
@@ -381,6 +628,8 @@ class ElectrsApi implements AbstractBitcoinApi {
         unreachable: !!host.unreachable,
         checked: !!host.checked,
         lastChecked: host.lastChecked || 0,
+        hashes: host.hashes,
+        ...(config.MEMPOOL.NETWORK === 'liquid' ? { liquidAudit: host.liquidAudit } : {}),
       }));
     } else {
       return [];

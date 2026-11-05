@@ -1,5 +1,6 @@
 import { Price } from '@app/services/price.service';
 import { IChannel } from '@interfaces/node-api.interface';
+import { ParsedTaproot } from '../shared/transaction.utils';
 
 export interface Transaction {
   txid: string;
@@ -32,6 +33,8 @@ export interface Transaction {
   price?: Price;
   sigops?: number;
   flags?: bigint;
+  largeInput?: boolean;
+  largeOutput?: boolean;
 }
 
 export interface TransactionChannels {
@@ -76,6 +79,10 @@ export interface Vin {
   lazy?: boolean;
   // Ord
   isInscription?: boolean;
+  // temporary field for extracted raw simplicity scripts
+  inner_simplicityscript?: string;
+  // parsed taproot info
+  taprootInfo?: ParsedTaproot;
 }
 
 interface Issuance {
@@ -185,9 +192,9 @@ export interface MempoolStats {
 
 export interface Outspend {
   spent: boolean;
-  txid: string;
-  vin: number;
-  status: Status;
+  txid?: string;
+  vin?: number;
+  status?: Status;
 }
 
 export interface Asset {
@@ -199,6 +206,10 @@ export interface Asset {
   status: Status;
   chain_stats: AssetStats;
   mempool_stats: AssetStats;
+  name?: string;
+  ticker?: string;
+  precision?: number;
+  entity?: Entity;
 }
 
 export interface AssetExtended extends Asset {
@@ -212,6 +223,15 @@ export interface AssetExtended extends Asset {
 
 export interface Entity {
   domain: string;
+}
+
+export interface AssetRegistryItem {
+  asset_id: string;
+  name: string;
+  ticker?: string;
+  precision?: number;
+  domain?: string;
+  entity?: Entity;
 }
 
 interface IssuanceTxin {

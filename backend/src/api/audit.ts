@@ -1,29 +1,44 @@
 import config from '../config';
 import logger from '../logger';
 import { MempoolTransactionExtended, MempoolBlockWithTransactions } from '../mempool.interfaces';
+import { Acceleration } from './services/acceleration';
 import rbfCache from './rbf-cache';
 import transactionUtils from './transaction-utils';
 
 const PROPAGATION_MARGIN = 180; // in seconds, time since a transaction is first seen after which it is assumed to have propagated to all miners
 
+export interface AuditResult {
+  unseen: string[];
+  censored: string[];
+  added: string[];
+  prioritized: string[];
+  fresh: string[];
+  sigop: string[];
+  fullrbf: string[];
+  accelerated: string[];
+  matchRate: number;
+  similarity: number;
+}
+
 class Audit {
-  auditBlock(height: number, transactions: MempoolTransactionExtended[], projectedBlocks: MempoolBlockWithTransactions[], mempool: { [txId: string]: MempoolTransactionExtended })
-   : { unseen: string[], censored: string[], added: string[], prioritized: string[], fresh: string[], sigop: string[], fullrbf: string[], accelerated: string[], score: number, similarity: number } {
+  auditBlock(
+    transactions: MempoolTransactionExtended[],
+    projectedBlocks: MempoolBlockWithTransactions[],
+    mempool: { [txId: string]: MempoolTransactionExtended },
+    poolAccelerated: Set<string>,
+  ): AuditResult {
     if (!projectedBlocks?.[0]?.transactionIds || !mempool) {
-      return { unseen: [], censored: [], added: [], prioritized: [], fresh: [], sigop: [], fullrbf: [], accelerated: [], score: 1, similarity: 1 };
+      return { unseen: [], censored: [], added: [], prioritized: [], fresh: [], sigop: [], fullrbf: [], accelerated: [], matchRate: 100, similarity: 1 };
     }
 
     const matches: string[] = []; // present in both mined block and template
     const added: string[] = []; // present in mined block, not in template
     const unseen: string[] = []; // present in the mined block, not in our mempool
-    let prioritized: string[] = []; // higher in the block than would be expected by in-band feerate alone
-    let deprioritized: string[] = []; // lower in the block than would be expected by in-band feerate alone
     const fresh: string[] = []; // missing, but firstSeen or lastBoosted within PROPAGATION_MARGIN
     const rbf: string[] = []; // either missing or present, and either part of a full-rbf replacement, or a conflict with the mined block
     const accelerated: string[] = []; // prioritized by the mempool accelerator
     const isCensored = {}; // missing, without excuse
     const isDisplaced = {};
-    const isAccelerated = {};
     let displacedWeight = 0;
     let matchedWeight = 0;
     let projectedWeight = 0;
@@ -34,9 +49,8 @@ class Audit {
     const now = Math.round((Date.now() / 1000));
     for (const tx of transactions) {
       inBlock[tx.txid] = tx;
-      if (mempool[tx.txid] && mempool[tx.txid].acceleration) {
+      if (mempool[tx.txid] && poolAccelerated.has(tx.txid)) {
         accelerated.push(tx.txid);
-        isAccelerated[tx.txid] = true;
       }
     }
     // coinbase is always expected
@@ -55,7 +69,7 @@ class Audit {
         } else if (mempool[txid]?.lastBoosted != null && (now - (mempool[txid]?.lastBoosted || 0)) <= PROPAGATION_MARGIN) {
           // tx was recently cpfp'd, miner may not have the latest effective rate
           fresh.push(txid);
-        } else {
+        } else if (mempool[txid].effectiveFeePerVsize >= 1) { // transactions paying < 1 sat/vbyte are never considered censored
           isCensored[txid] = true;
         }
         displacedWeight += mempool[txid]?.weight || 0;
@@ -135,7 +149,8 @@ class Audit {
       totalWeight += tx.weight;
     }
 
-    ({ prioritized, deprioritized } = transactionUtils.identifyPrioritizedTransactions(transactions, 'effectiveFeePerVsize'));
+    // higher in the block than would be expected by in-band feerate alone
+    const { prioritized } = transactionUtils.identifyPrioritizedTransactions(transactions, 'effectiveFeePerVsize');
 
     // transactions missing from near the end of our template are probably not being censored
     let overflowWeightRemaining = overflowWeight - (config.MEMPOOL.BLOCK_WEIGHT_UNITS - totalWeight);
@@ -176,6 +191,8 @@ class Audit {
     }
     const similarity = projectedWeight ? matchedWeight / projectedWeight : 1;
 
+    const matchRate = Math.round(score * 100 * 100) / 100;
+
     return {
       unseen,
       censored: Object.keys(isCensored),
@@ -185,9 +202,31 @@ class Audit {
       sigop: [],
       fullrbf: rbf,
       accelerated,
-      score,
+      matchRate,
       similarity,
     };
+  }
+
+  // the mempool `acceleration` flag ignores which pools accepted the acceleration, so derive it per pool
+  getPoolAcceleratedTxids(
+    mempool: { [txId: string]: MempoolTransactionExtended },
+    accelerations: Record<string, Acceleration>,
+    poolId: number,
+  ): Set<string> {
+    const txids = new Set<string>();
+    for (const acceleration of Object.values(accelerations)) {
+      const tx = mempool[acceleration.txid];
+      if (!tx || !acceleration.pools?.includes(poolId)) {
+        continue;
+      }
+      txids.add(tx.txid);
+      for (const ancestor of tx.ancestors || []) {
+        if (mempool[ancestor.txid]) {
+          txids.add(ancestor.txid);
+        }
+      }
+    }
+    return txids;
   }
 }
 

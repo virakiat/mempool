@@ -1,11 +1,16 @@
 import { NgModule } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { NgbCollapseModule, NgbTypeaheadModule } from '@ng-bootstrap/ng-bootstrap';
+import { NgbCollapseModule, NgbTypeaheadModule, NgbNavModule, NgbTooltipModule, NgbPaginationModule, NgbDropdownModule, NgbDatepickerModule } from '@ng-bootstrap/ng-bootstrap';
 import { FontAwesomeModule, FaIconLibrary } from '@fortawesome/angular-fontawesome';
-import { faFilter, faAngleDown, faAngleUp, faAngleRight, faAngleLeft, faBolt, faChartArea, faCogs, faCubes, faHammer, faDatabase, faExchangeAlt, faInfoCircle,
-  faLink, faList, faSearch, faCaretUp, faCaretDown, faTachometerAlt, faThList, faTint, faTv, faClock, faAngleDoubleDown, faSortUp, faAngleDoubleUp, faChevronDown,
-  faFileAlt, faRedoAlt, faArrowAltCircleRight, faExternalLinkAlt, faBook, faListUl, faDownload, faQrcode, faArrowRightArrowLeft, faArrowsRotate, faCircleLeft, faFastForward, faWallet, faUserClock, faWrench, faUserFriends, faQuestionCircle, faHistory, faSignOutAlt, faKey, faSuitcase, faIdCardAlt, faNetworkWired, faUserCheck, faCircleCheck, faUserCircle, faCheck, faRocket, faScaleBalanced, faHourglassStart, faHourglassHalf, faHourglassEnd, faWandMagicSparkles, faFaucetDrip, faTimeline, faCircleXmark, faCalendarCheck } from '@fortawesome/free-solid-svg-icons';
-import { InfiniteScrollModule } from 'ngx-infinite-scroll';
+import { faFilter, faAngleDown, faAngleUp, faAngleRight, faAngleLeft, faBolt, faCogs, faDatabase, faExchangeAlt, faInfoCircle,
+  faLink, faList, faSearch, faCaretUp, faCaretDown, faTachometerAlt, faThList, faTint, faClock, faAngleDoubleDown, faSortUp, faAngleDoubleUp, faChevronDown,
+  faFileAlt, faRedoAlt, faArrowAltCircleRight, faExternalLinkAlt, faListUl, faDownload, faQrcode, faArrowRightArrowLeft, faArrowsRotate, faCircleLeft,
+  faFastForward, faWallet, faUserClock, faWrench, faUserFriends, faQuestionCircle, faHistory, faSignOutAlt, faKey, faSuitcase, faIdCardAlt, faNetworkWired, faUserCheck,
+  faCircleCheck, faUserCircle, faCheck, faRocket, faScaleBalanced, faHourglassStart, faHourglassHalf, faHourglassEnd, faWandMagicSparkles, faTimeline,
+  faCircleXmark, faCalendarCheck, faMoneyBillTrendUp, faRobot, faShareNodes, faCreditCard, faMicroscope, faExclamationTriangle, faLockOpen, faPaperclip, faAddressCard,
+  faMedal, faBug, faFilePdf, faPiggyBank, faLayerGroup, faHeart, faCashRegister, faCodeFork, faCode, 
+  faCalendar, faPause, faPlay, faExpand, faCompress} from '@fortawesome/free-solid-svg-icons';
+import { InfiniteScrollDirective } from '@app/shared/directives/infinite-scroll.directive';
 import { MenuComponent } from '@components/menu/menu.component';
 import { PreviewTitleComponent } from '@components/master-page-preview/preview-title.component';
 import { VbytesPipe } from '@app/shared/pipes/bytes-pipe/vbytes.pipe';
@@ -15,6 +20,7 @@ import { Hex2asciiPipe } from '@app/shared/pipes/hex2ascii/hex2ascii.pipe';
 import { Decimal2HexPipe } from '@app/shared/pipes/decimal2hex/decimal2hex.pipe';
 import { FeeRoundingPipe } from '@app/shared/pipes/fee-rounding/fee-rounding.pipe';
 import { AsmStylerPipe } from '@app/shared/pipes/asm-styler/asm-styler.pipe';
+import { AsmComponent } from '@app/shared/components/asm/asm.component';
 import { AbsolutePipe } from '@app/shared/pipes/absolute/absolute.pipe';
 import { RelativeUrlPipe } from '@app/shared/pipes/relative-url/relative-url.pipe';
 import { ScriptpubkeyTypePipe } from '@app/shared/pipes/scriptpubkey-type-pipe/scriptpubkey-type.pipe';
@@ -27,15 +33,15 @@ import { TimeComponent } from '@components/time/time.component';
 import { ClipboardComponent } from '@components/clipboard/clipboard.component';
 import { QrcodeComponent } from '@components/qrcode/qrcode.component';
 import { FiatComponent } from '@app/fiat/fiat.component';
-import { NgbNavModule, NgbTooltipModule, NgbPaginationModule, NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap';
 import { TxFeaturesComponent } from '@components/tx-features/tx-features.component';
 import { TxFeeRatingComponent } from '@components/tx-fee-rating/tx-fee-rating.component';
-import { ReactiveFormsModule } from '@angular/forms';
+import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { LanguageSelectorComponent } from '@components/language-selector/language-selector.component';
 import { FiatSelectorComponent } from '@components/fiat-selector/fiat-selector.component';
 import { RateUnitSelectorComponent } from '@components/rate-unit-selector/rate-unit-selector.component';
 import { ThemeSelectorComponent } from '@components/theme-selector/theme-selector.component';
 import { AmountSelectorComponent } from '@components/amount-selector/amount-selector.component';
+import { TimezoneSelectorComponent } from '@components/timezone-selector/timezone-selector.component';
 import { BrowserOnlyDirective } from '@app/shared/directives/browser-only.directive';
 import { ServerOnlyDirective } from '@app/shared/directives/server-only.directive';
 import { ColoredPriceDirective } from '@app/shared/directives/colored-price.directive';
@@ -79,6 +85,9 @@ import { AmountShortenerPipe } from '@app/shared/pipes/amount-shortener.pipe';
 import { DifficultyAdjustmentsTable } from '@components/difficulty-adjustments-table/difficulty-adjustments-table.components';
 import { BlocksList } from '@components/blocks-list/blocks-list.component';
 import { RbfList } from '@components/rbf-list/rbf-list.component';
+import { RecentTransactionsList } from '@components/recent-transactions-list/recent-transactions-list.component';
+import { StaleList } from '@components/stale-list/stale-list.component';
+import { StratumList } from '@components/stratum/stratum-list/stratum-list.component';
 import { RewardStatsComponent } from '@components/reward-stats/reward-stats.component';
 import { DataCyDirective } from '@app/data-cy.directive';
 import { LoadingIndicatorComponent } from '@components/loading-indicator/loading-indicator.component';
@@ -89,6 +98,7 @@ import { SatsComponent } from '@app/shared/components/sats/sats.component';
 import { BtcComponent } from '@app/shared/components/btc/btc.component';
 import { FeeRateComponent } from '@app/shared/components/fee-rate/fee-rate.component';
 import { AddressTypeComponent } from '@app/shared/components/address-type/address-type.component';
+import { AddressTextComponent } from '@app/shared/components/address-text/address-text.component';
 import { TruncateComponent } from '@app/shared/components/truncate/truncate.component';
 import { SearchResultsComponent } from '@components/search-form/search-results/search-results.component';
 import { TimestampComponent } from '@app/shared/components/timestamp/timestamp.component';
@@ -98,6 +108,7 @@ import { GeolocationComponent } from '@app/shared/components/geolocation/geoloca
 import { TestnetAlertComponent } from '@app/shared/components/testnet-alert/testnet-alert.component';
 import { GlobalFooterComponent } from '@app/shared/components/global-footer/global-footer.component';
 import { MempoolErrorComponent } from '@app/shared/components/mempool-error/mempool-error.component';
+import { MiningPoolComponent } from '@app/shared/components/mining-pool/mining-pool.component';
 import { AccelerationsListComponent } from '@components/acceleration/accelerations-list/accelerations-list.component';
 import { PendingStatsComponent } from '@components/acceleration/pending-stats/pending-stats.component';
 import { AccelerationStatsComponent } from '@components/acceleration/acceleration-stats/acceleration-stats.component';
@@ -115,11 +126,14 @@ import { CalculatorComponent } from '@components/calculator/calculator.component
 import { BitcoinsatoshisPipe } from '@app/shared/pipes/bitcoinsatoshis.pipe';
 import { HttpErrorComponent } from '@app/shared/components/http-error/http-error.component';
 import { TwitterWidgetComponent } from '@components/twitter-widget/twitter-widget.component';
+import { SimpleProofWidgetComponent } from '@components/simpleproof-widget/simpleproof-widget.component';
+import { SimpleProofCuboWidgetComponent } from '@components/simpleproof-widget/simpleproof-cubo-widget.component';
 import { FaucetComponent } from '@components/faucet/faucet.component';
 import { TwitterLogin } from '@components/twitter-login/twitter-login.component';
 import { BitcoinInvoiceComponent } from '@components/bitcoin-invoice/bitcoin-invoice.component';
 
 import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/weight-directives/weight-directives';
+import { GithubLogin } from '@components/github-login.component/github-login.component';
 
 @NgModule({
   declarations: [
@@ -134,11 +148,13 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     ThemeSelectorComponent,
     RateUnitSelectorComponent,
     AmountSelectorComponent,
+    TimezoneSelectorComponent,
     ScriptpubkeyTypePipe,
     RelativeUrlPipe,
     NoSanitizePipe,
     Hex2asciiPipe,
     AsmStylerPipe,
+    AsmComponent,
     AbsolutePipe,
     BytesPipe,
     VbytesPipe,
@@ -153,6 +169,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     ColoredPriceDirective,
     BrowserOnlyDirective,
     ServerOnlyDirective,
+    InfiniteScrollDirective,
     BlockchainComponent,
     BlockViewComponent,
     EightBlocksComponent,
@@ -196,6 +213,9 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     DifficultyAdjustmentsTable,
     BlocksList,
     RbfList,
+    RecentTransactionsList,
+    StaleList,
+    StratumList,
     DataCyDirective,
     RewardStatsComponent,
     LoadingIndicatorComponent,
@@ -206,6 +226,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     BtcComponent,
     FeeRateComponent,
     AddressTypeComponent,
+    AddressTextComponent,
     TruncateComponent,
     SearchResultsComponent,
     TimestampComponent,
@@ -214,6 +235,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     GeolocationComponent,
     TestnetAlertComponent,
     GlobalFooterComponent,
+    MiningPoolComponent,
     CalculatorComponent,
     BitcoinsatoshisPipe,
     BlockViewComponent,
@@ -233,13 +255,17 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     OrdDataComponent,
     HttpErrorComponent,
     TwitterWidgetComponent,
+    SimpleProofWidgetComponent,
+    SimpleProofCuboWidgetComponent,
     FaucetComponent,
     TwitterLogin,
+    GithubLogin,
     BitcoinInvoiceComponent,
   ],
   imports: [
     CommonModule,
     RouterModule,
+    FormsModule,
     ReactiveFormsModule,
     NgbNavModule,
     NgbTooltipModule,
@@ -247,7 +273,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     NgbTypeaheadModule,
     NgbDropdownModule,
     NgbCollapseModule,
-    InfiniteScrollModule,
+    NgbDatepickerModule,
     FontAwesomeModule,
   ],
   providers: [
@@ -259,6 +285,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     ShortenStringPipe,
     CapAddressPipe,
     AmountShortenerPipe,
+    FeeRoundingPipe,
   ],
   exports: [
     MenuComponent,
@@ -270,7 +297,6 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     NgbTypeaheadModule,
     NgbDropdownModule,
     NgbCollapseModule,
-    InfiniteScrollModule,
     FontAwesomeModule,
     TimeComponent,
     ClipboardComponent,
@@ -283,6 +309,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     RateUnitSelectorComponent,
     ThemeSelectorComponent,
     AmountSelectorComponent,
+    TimezoneSelectorComponent,
     ScriptpubkeyTypePipe,
     RelativeUrlPipe,
     Hex2asciiPipe,
@@ -301,6 +328,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     ColoredPriceDirective,
     BrowserOnlyDirective,
     ServerOnlyDirective,
+    InfiniteScrollDirective,
     NoSanitizePipe,
     BlockchainComponent,
     MempoolBlocksComponent,
@@ -339,6 +367,9 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     AmountShortenerPipe,
     DifficultyAdjustmentsTable,
     BlocksList,
+    RecentTransactionsList,
+    StaleList,
+    StratumList,
     DataCyDirective,
     RewardStatsComponent,
     LoadingIndicatorComponent,
@@ -349,6 +380,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     BtcComponent,
     FeeRateComponent,
     AddressTypeComponent,
+    AddressTextComponent,
     TruncateComponent,
     SearchResultsComponent,
     TimestampComponent,
@@ -356,6 +388,7 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     ToggleComponent,
     GeolocationComponent,
     TestnetAlertComponent,
+    MiningPoolComponent,
     PreviewTitleComponent,
     GlobalFooterComponent,
     MempoolErrorComponent,
@@ -366,7 +399,10 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
     OrdDataComponent,
     HttpErrorComponent,
     TwitterWidgetComponent,
+    SimpleProofWidgetComponent,
+    SimpleProofCuboWidgetComponent,
     TwitterLogin,
+    GithubLogin,
     BitcoinInvoiceComponent,
     BitcoinsatoshisPipe,
 
@@ -382,16 +418,11 @@ import { OnlyVsizeDirective, OnlyWeightDirective } from '@app/shared/components/
 export class SharedModule {
   constructor(library: FaIconLibrary) {
     library.addIcons(faInfoCircle);
-    library.addIcons(faChartArea);
-    library.addIcons(faTv);
     library.addIcons(faClock);
     library.addIcons(faTachometerAlt);
-    library.addIcons(faCubes);
-    library.addIcons(faHammer);
     library.addIcons(faCogs);
     library.addIcons(faThList);
     library.addIcons(faList);
-    library.addIcons(faTachometerAlt);
     library.addIcons(faDatabase);
     library.addIcons(faSearch);
     library.addIcons(faLink);
@@ -415,7 +446,6 @@ export class SharedModule {
     library.addIcons(faCaretDown);
     library.addIcons(faAngleRight);
     library.addIcons(faAngleLeft);
-    library.addIcons(faBook);
     library.addIcons(faListUl);
     library.addIcons(faDownload);
     library.addIcons(faQrcode);
@@ -444,9 +474,31 @@ export class SharedModule {
     library.addIcons(faHourglassHalf);
     library.addIcons(faHourglassEnd);
     library.addIcons(faWandMagicSparkles);
-    library.addIcons(faFaucetDrip);
     library.addIcons(faTimeline);
     library.addIcons(faCircleXmark);
     library.addIcons(faCalendarCheck);
+    library.addIcons(faCalendar);
+    library.addIcons(faMoneyBillTrendUp);
+    library.addIcons(faRobot);
+    library.addIcons(faShareNodes);
+    library.addIcons(faCreditCard);
+    library.addIcons(faMicroscope);
+    library.addIcons(faExclamationTriangle);
+    library.addIcons(faLockOpen);
+    library.addIcons(faPaperclip);
+    library.addIcons(faMedal);
+    library.addIcons(faAddressCard);
+    library.addIcons(faBug);
+    library.addIcons(faFilePdf);
+    library.addIcons(faPiggyBank);
+    library.addIcons(faLayerGroup);
+    library.addIcons(faHeart);
+    library.addIcons(faCashRegister);
+    library.addIcons(faCodeFork);
+    library.addIcons(faCode);
+    library.addIcons(faPause);
+    library.addIcons(faPlay);
+    library.addIcons(faExpand);
+    library.addIcons(faCompress);
   }
 }

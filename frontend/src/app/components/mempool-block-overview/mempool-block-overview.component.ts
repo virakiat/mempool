@@ -16,6 +16,7 @@ import { FilterMode, GradientMode } from '@app/shared/filters.utils';
   selector: 'app-mempool-block-overview',
   templateUrl: './mempool-block-overview.component.html',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  standalone: false,
 })
 export class MempoolBlockOverviewComponent implements OnInit, OnDestroy, OnChanges, AfterViewInit {
   @Input() index: number;
@@ -120,6 +121,7 @@ export class MempoolBlockOverviewComponent implements OnInit, OnDestroy, OnChang
   }
 
   ngOnDestroy(): void {
+    this.blockGraph?.destroy();
     this.blockSub.unsubscribe();
     this.timeLtrSubscription.unsubscribe();
     this.websocketService.stopTrackMempoolBlock();

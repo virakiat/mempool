@@ -32,14 +32,14 @@ class NodesRoutes {
       const nodes = await nodesApi.$searchNodeByPublicKeyOrAlias(req.params.search);
       res.json(nodes);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to search for node');
     }
   }
 
   private async $getNodeGroup(req: Request, res: Response) {
     try {
       let nodesList;
-      let nodes: any[] = [];
+      const nodes: any[] = [];
       switch (config.MEMPOOL.NETWORK) {
         case 'testnet':
           nodesList = [
@@ -174,7 +174,7 @@ class NodesRoutes {
           ];
       }
 
-      for (let pubKey of nodesList) {
+      for (const pubKey of nodesList) {
         try {
           const node = await nodesApi.$getNode(pubKey);
           if (node) {
@@ -188,7 +188,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(nodes);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get node group');
     }
   }
 
@@ -204,7 +204,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(node);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get node');
     }
   }
 
@@ -216,7 +216,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(statistics);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get historical node stats');
     }
   }
 
@@ -232,7 +232,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(node);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get fee histogram');
     }
   }
 
@@ -248,7 +248,7 @@ class NodesRoutes {
         topByChannels: topChannelsNodes,
       });
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get nodes ranking');
     }
   }
 
@@ -260,7 +260,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(topCapacityNodes);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get top nodes by capacity');
     }
   }
 
@@ -272,7 +272,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(topCapacityNodes);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get top nodes by channels');
     }
   }
 
@@ -284,7 +284,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(topCapacityNodes);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get oldest nodes');
     }
   }
 
@@ -296,7 +296,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 600).toUTCString());
       res.json(nodesPerAs);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get ISP ranking');
     }
   }
 
@@ -308,7 +308,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 600).toUTCString());
       res.json(worldNodes);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get world nodes');
     }
   }
 
@@ -336,7 +336,7 @@ class NodesRoutes {
         nodes: nodes,
       });
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get nodes per country');
     }
   }
 
@@ -354,7 +354,7 @@ class NodesRoutes {
         return;
       }
 
-      const nodes = await nodesApi.$getNodesPerISP(req.params.isp);
+      const nodes = await nodesApi.$getNodesPerISP(req.params.isp || '');
       res.header('Pragma', 'public');
       res.header('Cache-control', 'public');
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
@@ -363,7 +363,7 @@ class NodesRoutes {
         nodes: nodes,
       });
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get nodes per ISP');
     }
   }
 
@@ -375,7 +375,7 @@ class NodesRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 600).toUTCString());
       res.json(nodesPerAs);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get nodes per country');
     }
   }
 }

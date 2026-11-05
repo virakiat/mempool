@@ -28,7 +28,8 @@ function bestFitResolution(min, max, n): number {
 @Component({
   selector: 'app-block-view',
   templateUrl: './block-view.component.html',
-  styleUrls: ['./block-view.component.scss']
+  styleUrls: ['./block-view.component.scss'],
+  standalone: false,
 })
 export class BlockViewComponent implements OnInit, OnDestroy {
   network = '';
@@ -116,7 +117,7 @@ export class BlockViewComponent implements OnInit, OnDestroy {
         this.isLoadingBlock = false;
         this.isLoadingOverview = true;
       }),
-      shareReplay(1)
+      shareReplay({ bufferSize: 1, refCount: true })
     );
 
     this.overviewSubscription = block$.pipe(
@@ -175,6 +176,9 @@ export class BlockViewComponent implements OnInit, OnDestroy {
     }
     if (this.queryParamsSubscription) {
       this.queryParamsSubscription.unsubscribe();
+    }
+    if (this.blockGraph) {
+      this.blockGraph.destroy();
     }
   }
 }

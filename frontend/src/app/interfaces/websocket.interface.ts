@@ -21,6 +21,8 @@ export interface WebsocketResponse {
   rbfInfo?: RbfTree;
   rbfLatest?: RbfTree[];
   rbfLatestSummary?: ReplacementInfo[];
+  stratumJob?: StratumJob;
+  stratumJobs?: Record<number, StratumJob>;
   utxoSpent?: object;
   transactions?: TransactionStripped[];
   loadingIndicators?: ILoadingIndicators;
@@ -30,6 +32,8 @@ export interface WebsocketResponse {
   'track-tx'?: string;
   'track-address'?: string;
   'track-addresses'?: string[];
+  'track-addresses-error'?: string;
+  pong?: boolean;
   'track-scriptpubkeys'?: string[];
   'track-asset'?: string;
   'track-mempool-block'?: number;
@@ -37,6 +41,7 @@ export interface WebsocketResponse {
   'track-rbf-summary'?: boolean;
   'track-accelerations'?: boolean;
   'track-wallet'?: string;
+  'track-stratum'?: string | number;
   'watch-mempool'?: boolean;
   'refresh-blocks'?: boolean;
 }
@@ -144,4 +149,39 @@ export interface HealthCheckHost {
   link?: string;
   statusPage?: SafeResourceUrl;
   flag?: string;
+  hashes?: {
+    frontend?: string;
+    backend?: string;
+    electrs?: string;
+    hybrid?: string;
+    ssr?: string;
+    core?: string;
+    os?: string;
+  };
+  liquidAudit?: {
+    pegRatio: number;
+    bitcoinLastBlockUpdate: number;
+    liquidLastBlockUpdate: number;
+  };
+}
+
+export interface StratumJob {
+  pool: number;
+  height: number;
+  coinbase: string;
+  scriptsig: string;
+  reward: number;
+  jobId: string;
+  extraNonce: string;
+  extraNonce2Size: number;
+  prevHash: string;
+  coinbase1: string;
+  coinbase2: string;
+  merkleBranches: string[];
+  version: string;
+  bits: string;
+  time: string;
+  timestamp: number;
+  cleanJobs: boolean;
+  received: number;
 }

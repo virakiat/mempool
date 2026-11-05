@@ -147,7 +147,7 @@ export { opcodes };
 
 /** extracts m and n from a multisig script (asm), returns nothing if it is not a multisig script */
 export function parseMultisigScript(script: string): void | { m: number, n: number } {
-  if (!script) {
+  if (!script?.length) {
     return;
   }
   const ops = script.split(' ');
@@ -204,7 +204,7 @@ export function getVarIntLength(n: number): number {
 
 /** Extracts miner names from a DATUM coinbase transaction */
 export function parseDATUMTemplateCreator(coinbaseRaw: string): string[] | null {
-  let bytes: number[] = [];
+  const bytes: number[] = [];
   for (let c = 0; c < coinbaseRaw.length; c += 2) {
       bytes.push(parseInt(coinbaseRaw.slice(c, c + 2), 16));
   }
@@ -224,4 +224,27 @@ export function parseDATUMTemplateCreator(coinbaseRaw: string): string[] | null 
   tagString = tagString.replace('\x00', '');
 
   return tagString.split('\x0f').map((name) => name.replace(/[^a-zA-Z0-9 ]/g, ''));
+}
+
+/** Extracts miner names from a DMND coinbase transaction */
+export function parseDMNDTemplateCreator(coinbaseRaw: string): string[] {
+  try {
+    if (!coinbaseRaw || coinbaseRaw.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(coinbaseRaw)) {
+      return [];
+    }
+
+    const bytes = Buffer.from(coinbaseRaw, 'hex');
+    const blockHeightLength = bytes[0];
+    const tagDelimiterIndex = 1 + blockHeightLength;
+    if (bytes.length <= tagDelimiterIndex || bytes[tagDelimiterIndex] !== 0x00) {
+      return [];
+    }
+
+    const tagStart = tagDelimiterIndex + 1;
+    const tagEnd = bytes.indexOf(0x00, tagStart);
+    const tags = bytes.subarray(tagStart, tagEnd === -1 ? undefined : tagEnd);
+    return tags.toString('utf8').split('/').slice(1, -1);
+  } catch {
+    return [];
+  }
 }

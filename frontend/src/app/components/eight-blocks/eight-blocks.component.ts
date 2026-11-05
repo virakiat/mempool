@@ -5,7 +5,7 @@ import { Subject, Subscription, of } from 'rxjs';
 import { StateService } from '@app/services/state.service';
 import { WebsocketService } from '@app/services/websocket.service';
 import { RelativeUrlPipe } from '@app/shared/pipes/relative-url/relative-url.pipe';
-import { BlockExtended, TransactionStripped } from '@interfaces/node-api.interface';
+import type { BlockExtended, TransactionStripped } from '@interfaces/node-api.interface';
 import { ApiService } from '@app/services/api.service';
 import { BlockOverviewGraphComponent } from '@components/block-overview-graph/block-overview-graph.component';
 import { detectWebGL } from '@app/shared/graphs.utils';
@@ -45,6 +45,7 @@ interface BlockInfo extends BlockExtended {
       ])
     ]),
   ],
+  standalone: false,
 })
 export class EightBlocksComponent implements OnInit, OnDestroy {
   network = '';
@@ -162,6 +163,9 @@ export class EightBlocksComponent implements OnInit, OnDestroy {
     this.cacheBlocksSubscription?.unsubscribe();
     this.networkChangedSubscription?.unsubscribe();
     this.queryParamsSubscription?.unsubscribe();
+    this.blockGraphs.forEach(graph => {
+      graph.destroy();
+    });
   }
 
   shiftTestBlocks(): void {

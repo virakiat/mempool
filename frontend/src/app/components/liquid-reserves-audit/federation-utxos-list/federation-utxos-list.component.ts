@@ -1,6 +1,6 @@
 import { Component, OnInit, ChangeDetectionStrategy, Input } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
-import { BehaviorSubject, Observable, Subject, combineLatest, of, timer } from 'rxjs';
+import { BehaviorSubject, Observable, Subject, combineLatest, merge, of, timer } from 'rxjs';
 import { delayWhen, filter, map, share, shareReplay, switchMap, takeUntil, tap, throttleTime } from 'rxjs/operators';
 import { ApiService } from '@app/services/api.service';
 import { Env, StateService } from '@app/services/state.service';
@@ -11,6 +11,7 @@ import { WebsocketService } from '@app/services/websocket.service';
   selector: 'app-federation-utxos-list',
   templateUrl: './federation-utxos-list.component.html',
   styleUrls: ['./federation-utxos-list.component.scss'],
+  standalone: false,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class FederationUtxosListComponent implements OnInit {
@@ -35,7 +36,7 @@ export class FederationUtxosListComponent implements OnInit {
   isLoad: boolean = true;
 
   private destroy$ = new Subject();
-  
+
   constructor(
     private apiService: ApiService,
     public stateService: StateService,
@@ -57,7 +58,8 @@ export class FederationUtxosListComponent implements OnInit {
 
       this.websocketService.want(['blocks']);
 
-      this.auditStatus$ = this.stateService.blocks$.pipe(
+      // Bitcoin reserves can change even when no new Liquid block arrives.
+      this.auditStatus$ = merge(this.stateService.blocks$, timer(0, 60_000)).pipe(
         takeUntil(this.destroy$),
         throttleTime(40000),
         delayWhen(_ => this.isLoad ? timer(0) : timer(2000)),
@@ -124,7 +126,7 @@ export class FederationUtxosListComponent implements OnInit {
     const distanceToGreen = Math.abs(4032 - value);
     const green = '#3bcc49';
     const red = '#dc3545';
-  
+
     if (value < 0) {
       return red;
     } else if (value >= 4032) {
@@ -134,11 +136,11 @@ export class FederationUtxosListComponent implements OnInit {
       const r = parseInt(red.slice(1, 3), 16);
       const g = parseInt(green.slice(1, 3), 16);
       const b = parseInt(red.slice(5, 7), 16);
-      
+
       const newR = Math.floor(r + (g - r) * scaleFactor);
       const newG = Math.floor(g - (g - r) * scaleFactor);
       const newB = b;
-      
+
       return '#' + this.componentToHex(newR) + this.componentToHex(newG) + this.componentToHex(newB);
     }
   }

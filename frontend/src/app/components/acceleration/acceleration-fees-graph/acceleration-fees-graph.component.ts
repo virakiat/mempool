@@ -1,18 +1,17 @@
 import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Inject, Input, LOCALE_ID, NgZone, OnChanges, OnDestroy, OnInit, SimpleChanges } from '@angular/core';
-import { EChartsOption } from '@app/graphs/echarts';
+import { echarts, EChartsOption } from '@app/graphs/echarts';
 import { Observable, Subject, Subscription, combineLatest, fromEvent, merge, share } from 'rxjs';
-import { startWith, switchMap, tap } from 'rxjs/operators';
+import { distinctUntilChanged, startWith, switchMap, tap } from 'rxjs/operators';
 import { SeoService } from '@app/services/seo.service';
 import { formatNumber } from '@angular/common';
 import { UntypedFormBuilder, UntypedFormGroup } from '@angular/forms';
 import { download, formatterXAxis, formatterXAxisLabel, formatterXAxisTimeCategory } from '@app/shared/graphs.utils';
 import { StorageService } from '@app/services/storage.service';
 import { MiningService } from '@app/services/mining.service';
-import { ActivatedRoute, Router } from '@angular/router';
-import { Acceleration } from '@interfaces/node-api.interface';
+import { ActivatedRoute } from '@angular/router';
+import { Acceleration, BlockExtended } from '@interfaces/node-api.interface';
 import { ServicesApiServices } from '@app/services/services-api.service';
 import { StateService } from '@app/services/state.service';
-import { RelativeUrlPipe } from '@app/shared/pipes/relative-url/relative-url.pipe';
 
 @Component({
   selector: 'app-acceleration-fees-graph',
@@ -27,17 +26,21 @@ import { RelativeUrlPipe } from '@app/shared/pipes/relative-url/relative-url.pip
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  standalone: false,
 })
 export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDestroy {
   @Input() widget: boolean = false;
   @Input() height: number = 300;
-  @Input() right: number | string = 45;
-  @Input() left: number | string = 75;
-  @Input() period: '24h' | '3d' | '1w' | '1m' | 'all' = '1w';
+  @Input() right: number | string = 70;
+  @Input() left: number | string = 55;
+  @Input() period: '24h' | '1w' | '1m' | '1y' | 'all' = '1y';
   @Input() accelerations$: Observable<Acceleration[]>;
+
+  logScale = false;
 
   miningWindowPreference: string;
   radioGroupForm: UntypedFormGroup;
+  scaleForm: UntypedFormGroup;
 
   chartOptions: EChartsOption = {};
   chartInitOptions = {
@@ -46,12 +49,17 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
 
   aggregatedHistory$: Observable<any>;
   statsSubscription: Subscription;
+  aggregatedHistorySubscription: Subscription;
+  fragmentSubscription: Subscription;
   isLoading = true;
   formatNumber = formatNumber;
   timespan = '';
-  periodSubject$: Subject<'24h' | '3d' | '1w' | '1m' | 'all'> = new Subject();
+  periodSubject$: Subject<'24h' | '1w' | '1m' | '1y' | 'all'> = new Subject();
   chartInstance: any = undefined;
   daysAvailable: number = 0;
+
+  private readonly totalBidBoostLabel = $localize`:@@graphs.accelerationFees.totalBidBoost:Total bid boost`;
+  private readonly acceleratedLabel = $localize`:@@graphs.accelerationFees.accelerated:Accelerated`;
 
   constructor(
     @Inject(LOCALE_ID) public locale: string,
@@ -62,12 +70,11 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
     private miningService: MiningService,
     private route: ActivatedRoute,
     public stateService: StateService,
-    private cd: ChangeDetectorRef,
-    private router: Router,
-    private zone: NgZone,
+    private cd: ChangeDetectorRef
   ) {
     this.radioGroupForm = this.formBuilder.group({ dateSpan: '1w' });
     this.radioGroupForm.controls.dateSpan.setValue('1w');
+    this.scaleForm = this.formBuilder.group({scaleFunction: 'linear'});
   }
 
   ngOnInit(): void {
@@ -79,24 +86,56 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
     }
     this.radioGroupForm = this.formBuilder.group({ dateSpan: this.miningWindowPreference });
     this.radioGroupForm.controls.dateSpan.setValue(this.miningWindowPreference);
-    
-    this.route.fragment.subscribe((fragment) => {
-      if (['24h', '3d', '1w', '1m', '3m', 'all'].indexOf(fragment) > -1) {
-        this.radioGroupForm.controls.dateSpan.setValue(fragment, { emitEvent: false });
+
+    this.fragmentSubscription = this.route.fragment.subscribe((fragment) => {
+      if (!fragment) {
+        this.setScale('default');
+        return;
+      }
+
+      let timeVal = null;
+      let scaleVal = null;
+
+      if (fragment.includes('=')) {
+        const params = new URLSearchParams(fragment);
+        timeVal = params.get('time');
+        scaleVal = params.get('scale');
+      } else {
+        if (['1w', '1m', '3m', '6m', '1y', '2y', '3y', 'all'].includes(fragment)) {
+          timeVal = fragment;
+        }
+        if (['linear', 'log'].includes(fragment)) {
+          scaleVal = fragment;
+        }
+      }
+
+      if (timeVal && ['1w', '1m', '3m', '6m', '1y', '2y', '3y', 'all'].includes(timeVal)) {
+        this.radioGroupForm.controls.dateSpan.setValue(timeVal, { emitEvent: false });
+      }
+
+      if (scaleVal && ['linear', 'log'].includes(scaleVal)) {
+        this.setScale(scaleVal);
+      } else if (timeVal) {
+        this.setScale('default');
       }
     });
     this.aggregatedHistory$ = combineLatest([
-      merge(
-        this.radioGroupForm.get('dateSpan').valueChanges.pipe(
-          startWith(this.radioGroupForm.controls.dateSpan.value),
+      combineLatest({
+        timespan: merge(
+          this.radioGroupForm.get('dateSpan').valueChanges.pipe(
+            startWith(this.radioGroupForm.controls.dateSpan.value),
+          ),
+          this.periodSubject$,
         ),
-        this.periodSubject$
-      ).pipe(
-        switchMap((timespan) => {
+        chainTip: this.stateService.chainTip$.pipe(distinctUntilChanged()),
+      }).pipe(
+        switchMap(({ timespan }: { timespan: '24h' | '1w' | '1m' | '1y' | 'all'; chainTip: number }) => {
           if (!this.widget) {
             this.storageService.setValue('miningWindowPreference', timespan);
           }
-          this.isLoading = true;
+          if (timespan !== this.timespan) {
+            this.isLoading = true;
+          }
           this.timespan = timespan;
           return this.servicesApiService.getAggregatedAccelerationHistory$({timeframe: this.timespan});
         })
@@ -113,11 +152,14 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
       share(),
     );
 
-    this.aggregatedHistory$.subscribe();
+    this.aggregatedHistorySubscription = this.aggregatedHistory$.subscribe();
   }
 
   ngOnChanges(changes: SimpleChanges): void {
     if (changes.period) {
+      if (this.period === '24h') {
+        this.period = '1m';
+      }
       this.periodSubject$.next(this.period);
     }
   }
@@ -139,13 +181,19 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
     this.chartOptions = {
       title: title,
       color: [
-        '#8F5FF6',
-        '#6b6b6b',
+        new echarts.graphic.LinearGradient(0, 0, 0, 0.65, [
+          { offset: 0, color: '#F4511E' },
+          { offset: 0.25, color: '#FB8C00' },
+          { offset: 0.5, color: '#FFB300' },
+          { offset: 0.75, color: '#FDD835' },
+          { offset: 1, color: '#7CB342' }
+        ]),
+        '#ab2dce',
       ],
       animation: false,
       grid: {
-        height: (this.widget && this.height) ? this.height - 30 : undefined,
-        top: this.widget ? 20 : 40,
+        height: (this.widget && this.height) ? this.height - 50 : undefined,
+        top: this.widget ? 40 : 60,
         bottom: this.widget ? 30 : 80,
         right: this.right,
         left: this.left,
@@ -167,17 +215,18 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
         formatter: (ticks) => {
           let tooltip = `<b style="color: white; margin-left: 2px">${formatterXAxis(this.locale, this.timespan, parseInt(ticks[0].axisValue, 10))}</b><br>`;
 
-          if (ticks[0].data[1] > 10_000_000) {
-            tooltip += `${ticks[0].marker} ${ticks[0].seriesName}: ${formatNumber(ticks[0].data[1] / 100_000_000, this.locale, '1.0-8')} BTC<br>`;
-          } else {
-            tooltip += `${ticks[0].marker} ${ticks[0].seriesName}: ${formatNumber(ticks[0].data[1], this.locale, '1.0-0')} sats<br>`;
+          for (const tick of ticks) {
+            if (tick.seriesName === this.totalBidBoostLabel) {
+              if (tick.data[3] > 10_000_000) {
+                tooltip += `${tick.marker} ${this.totalBidBoostLabel}: ${formatNumber(tick.data[3] / 100_000_000, this.locale, '1.0-8')} BTC<br>`;
+              } else {
+                tooltip += `${tick.marker} ${this.totalBidBoostLabel}: ${formatNumber(tick.data[3], this.locale, '1.0-0')} sats<br>`;
+              }
+            } else if (tick && tick.seriesName === this.acceleratedLabel) {
+              tooltip += `${tick.marker} ${this.acceleratedLabel}: ${formatNumber(tick.data[1], this.locale, '1.0-0')}<br>`;
+            }
           }
-
-          if (['24h', '3d'].includes(this.timespan)) {
-            tooltip += `<small>` + $localize`At block: ${ticks[0].data[2]}` + `</small>`;
-          } else {
-            tooltip += `<small>` + $localize`Around block: ${ticks[0].data[2]}` + `</small>`;
-          }
+          tooltip += `<small>` + $localize`Around block: ${ticks[0].data[2]}` + `</small>`;
 
           return tooltip;
         }
@@ -202,24 +251,44 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
         },
       },
       legend: {
+        top: 'top',
         data: [
           {
-            name: 'Total bid boost',
+            name: this.totalBidBoostLabel,
             inactiveColor: 'rgb(110, 112, 121)',
             textStyle: {
-              color: 'white',
+              color: 'var(--fg)',
+            },
+            itemStyle: {
+              color: '#FFB300',
+            },
+            icon: 'roundRect',
+          },
+          {
+            name: this.acceleratedLabel,
+            inactiveColor: 'rgb(110, 112, 121)',
+            textStyle: {
+              color: 'var(--fg)',
             },
             icon: 'roundRect',
           },
         ],
         selected: {
-          'Total bid boost': true,
+          [this.totalBidBoostLabel]: true,
         },
         show: !this.widget,
       },
       yAxis: data.length === 0 ? undefined : [
         {
-          type: 'value',
+          type: this.logScale ? 'log' : 'value',
+          min: this.logScale ? 1 : undefined,
+          name: this.totalBidBoostLabel,
+          position: 'right',
+          nameTextStyle: {
+            align: 'right',
+            padding: [0, -65, 0, 0],
+            fontStyle: 'italic',
+          },
           axisLabel: {
             color: 'rgb(110, 112, 121)',
             formatter: (val) => {
@@ -230,6 +299,21 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
               }
             }
           },
+          splitLine: null
+        },
+        {
+          type: this.logScale ? 'log' : 'value',
+          min: this.logScale ? 1 : undefined,
+          name: this.acceleratedLabel,
+          position: 'left',
+          axisLabel: {
+            color: 'rgb(110, 112, 121)',
+          },
+          nameTextStyle: {
+            align: 'right',
+            padding: [0, -35, 0, 0],
+            fontStyle: 'italic',
+          },
           splitLine: {
             lineStyle: {
               type: 'dotted',
@@ -238,33 +322,29 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
             }
           },
         },
-        {
-          type: 'value',
-          position: 'right',
-          axisLabel: {
-            color: 'rgb(110, 112, 121)',
-            formatter: function(val) {
-              return `${val}`;
-            }.bind(this)
-          },
-          splitLine: {
-            show: false,
-          },
-        },
       ],
       series: data.length === 0 ? undefined : [
         {
-          legendHoverLink: false,
-          zlevel: 1,
-          name: 'Total bid boost',
+          name: this.totalBidBoostLabel,
           data: data.map(h =>  {
-            return [h.timestamp * 1000, h.sumBidBoost, h.avgHeight]
+            return [h.timestamp * 1000, this.logScale ? Math.max(h.sumBidBoost, 1) : h.sumBidBoost, h.avgHeight, h.sumBidBoost];
           }),
-          stack: 'Total',
+          type: 'line',
+          symbol: 'none',
+          lineStyle: {
+            width: 1,
+          },
+          smooth: true,
+        },
+        {
+          name: this.acceleratedLabel,
+          yAxisIndex: 1,
+          data: data.map(h =>  {
+            return [h.timestamp * 1000, h.count, h.avgHeight];
+          }),
           type: 'bar',
-          barWidth: '90%',
-          large: true,
-          barMinHeight: 3,
+          barWidth: this.logScale ? undefined : '90%',
+          barMinHeight: this.logScale ? 4 : undefined,
         },
       ],
       dataZoom: (this.widget || data.length === 0 )? undefined : [{
@@ -297,19 +377,6 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
 
   onChartInit(ec) {
     this.chartInstance = ec;
-
-    this.chartInstance.on('click', (e) => {
-      this.zone.run(() => {
-        if (['24h', '3d'].includes(this.timespan)) {
-          const url = new RelativeUrlPipe(this.stateService).transform(`/block/${e.data[2]}`);
-          if (e.event.event.shiftKey || e.event.event.ctrlKey || e.event.event.metaKey) {
-            window.open(url);
-          } else {
-            this.router.navigate([url]);
-          }
-        }
-      });
-    });
   }
 
   isMobile() {
@@ -335,8 +402,54 @@ export class AccelerationFeesGraphComponent implements OnInit, OnChanges, OnDest
   }
 
   ngOnDestroy(): void {
-    if (this.statsSubscription) {
-      this.statsSubscription.unsubscribe();
+    this.aggregatedHistorySubscription?.unsubscribe();
+    this.fragmentSubscription?.unsubscribe();
+    this.statsSubscription?.unsubscribe();
+  }
+
+  getFragment(setParams: Record<string, string> = {}): string {
+    let fragment = this.route.snapshot.fragment ?? '';
+    if (!fragment.includes('=')) {
+      fragment = '';
     }
+    const params = new URLSearchParams(fragment);
+    params.set('time', setParams.time || this.radioGroupForm.controls.dateSpan.value);
+    params.set('scale', setParams.scale || this.scaleForm.controls.scaleFunction.value);
+    return params.toString();
+  }
+
+  private setScale(scale: 'default' | 'linear' | 'log') {
+    if (scale === 'default') {
+      this.scaleForm.controls.scaleFunction.setValue('linear', { emitEvent: false });
+    } else {
+      this.scaleForm.controls.scaleFunction.setValue(scale, { emitEvent: false });
+    }
+    this.onScaleChange();
+  }
+
+  onScaleChange() {
+    this.logScale = this.scaleForm.get('scaleFunction')?.value === 'log';
+
+    if (!this.chartInstance || !this.chartOptions.yAxis || !this.chartOptions.series) {
+      return;
+    }
+    const yAxes = this.chartOptions.yAxis as any[];
+    const series = this.chartOptions.series as any[];
+
+    yAxes[0].type = this.logScale ? 'log' : 'value';
+    yAxes[0].min = this.logScale ? 1 : undefined;
+
+    yAxes[1].type = this.logScale ? 'log' : 'value';
+    yAxes[1].min = this.logScale ? 1 : undefined;
+
+    series[0].data.forEach(h => {
+      h[1] = this.logScale ? Math.max(h[3], 1) : h[3];
+    });
+    series[1].barWidth = this.logScale ? undefined : '90%';
+    series[1].barMinHeight = this.logScale ? 4 : undefined;
+    this.chartInstance.setOption({
+      yAxis: yAxes,
+      series: series
+    });
   }
 }

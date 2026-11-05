@@ -1,8 +1,8 @@
 import { Component, OnInit, OnDestroy, ViewChildren, QueryList, ChangeDetectorRef } from '@angular/core';
 import { Location } from '@angular/common';
-import { ActivatedRoute, ParamMap, Router } from '@angular/router';
+import { ActivatedRoute, ParamMap, Params, Router } from '@angular/router';
 import { ElectrsApiService } from '@app/services/electrs-api.service';
-import { switchMap, tap, throttleTime, catchError, map, shareReplay, startWith, filter } from 'rxjs/operators';
+import { switchMap, tap, throttleTime, catchError, map, shareReplay, startWith, filter, take } from 'rxjs/operators';
 import { Observable, of, Subscription, asyncScheduler, EMPTY, combineLatest, forkJoin } from 'rxjs';
 import { StateService } from '@app/services/state.service';
 import { SeoService } from '@app/services/seo.service';
@@ -19,9 +19,20 @@ import { ServicesApiServices } from '@app/services/services-api.service';
 import { PreloadService } from '@app/services/preload.service';
 import { identifyPrioritizedTransactions } from '@app/shared/transaction.utils';
 
+interface ComparisonStats {
+  totalFees: number;
+  totalWeight: number;
+  totalVsize: number;
+  txCount: number;
+  feeDelta: number;
+  weightDelta: number;
+  txDelta: number;
+}
+
 @Component({
   selector: 'app-block',
   templateUrl: './block.component.html',
+  standalone: false,
   styleUrls: ['./block.component.scss'],
   styles: [`
     .loadingGraphs {
@@ -67,9 +78,11 @@ export class BlockComponent implements OnInit, OnDestroy {
   numMissing: number = 0;
   paginationMaxSize = window.matchMedia('(max-width: 670px)').matches ? 3 : 5;
   numUnexpected: number = 0;
-  mode: 'projected' | 'actual' = 'projected';
+  mode: 'projected' | 'actual' | 'stale' = 'projected';
+  currentQueryParams: Params;
 
   overviewSubscription: Subscription;
+  canonicalSubscription: Subscription;
   accelerationsSubscription: Subscription;
   keyNavigationSubscription: Subscription;
   blocksSubscription: Subscription;
@@ -80,10 +93,15 @@ export class BlockComponent implements OnInit, OnDestroy {
   timeLtr: boolean;
   childChangeSubscription: Subscription;
   auditPrefSubscription: Subscription;
+  isAuditEnabledSubscription: Subscription;
   oobSubscription: Subscription;
-  
   priceSubscription: Subscription;
   blockConversion: Price;
+  canonicalBlock: BlockExtended;
+  canonicalTransactions: TransactionStripped[];
+  staleTransactions: TransactionStripped[];
+  staleStats: ComparisonStats | null = null;
+  canonicalStats: ComparisonStats | null = null;
 
   @ViewChildren('blockGraphProjected') blockGraphProjected: QueryList<BlockOverviewGraphComponent>;
   @ViewChildren('blockGraphActual') blockGraphActual: QueryList<BlockOverviewGraphComponent>;
@@ -107,6 +125,10 @@ export class BlockComponent implements OnInit, OnDestroy {
     this.webGlEnabled = this.stateService.isBrowser && detectWebGL();
   }
 
+  get showComparison() {
+    return this.showAudit || this.block?.stale;
+  }
+
   ngOnInit(): void {
     this.websocketService.want(['blocks', 'mempool-blocks']);
     this.network = this.stateService.network;
@@ -118,17 +140,19 @@ export class BlockComponent implements OnInit, OnDestroy {
     this.setAuditAvailable(this.auditSupported);
 
     if (this.auditSupported) {
-      this.isAuditEnabledFromParam().subscribe(auditParam => {
+      this.isAuditEnabledSubscription = this.isAuditEnabledFromParam().subscribe(auditParam => {
         if (this.auditParamEnabled) {
           this.auditModeEnabled = auditParam;
-        } else {
-          this.auditPrefSubscription = this.stateService.hideAudit.subscribe(hide => {
-            this.auditModeEnabled = !hide;
-            this.showAudit = this.auditAvailable && this.auditModeEnabled;
-          });
         }
       });
     }
+    this.auditPrefSubscription = this.stateService.hideAudit.subscribe((hide) => {
+      this.auditModeEnabled = !hide;
+      this.showAudit = this.auditSupported && this.auditAvailable && this.auditModeEnabled;
+      if (this.block?.stale) {
+        this.setupBlockGraphs();
+      }
+    });
 
     this.cacheBlocksSubscription = this.cacheService.loadedBlocks$.subscribe((block) => {
       this.loadedCacheBlock(block);
@@ -150,9 +174,10 @@ export class BlockComponent implements OnInit, OnDestroy {
                 this.fees = block.extras.reward / 100000000 - this.blockSubsidy;
               }
             }
-          } else if (block.height === this.block?.height) {
+          } else if (block.height === this.block?.height && block.id !== this.block?.id) {
             this.block.stale = true;
             this.block.canonical = block.id;
+            this.fetchCanonicalBlock();
           }
         }
       });
@@ -201,7 +226,7 @@ export class BlockComponent implements OnInit, OnDestroy {
                 switchMap((hash) => {
                   this.blockHash = hash;
                   this.location.replaceState(
-                    this.router.createUrlTree([(this.network ? '/' + this.network : '') + '/block/', hash]).toString()
+                    this.router.createUrlTree([this.relativeUrlPipe.transform('/block/'), hash]).toString()
                   );
                   this.seoService.updateCanonical(this.location.path());
                   return this.apiService.getBlock$(hash).pipe(
@@ -249,6 +274,7 @@ export class BlockComponent implements OnInit, OnDestroy {
         }
         this.updateAuditAvailableFromBlockHeight(block.height);
         this.block = block;
+        this.blockHash = block.id;
         if (block.extras) {
           block.extras.minFee = this.getMinBlockFee(block);
           block.extras.maxFee = this.getMaxBlockFee(block);
@@ -269,24 +295,27 @@ export class BlockComponent implements OnInit, OnDestroy {
         if (block?.extras?.reward !== undefined) {
           this.fees = block.extras.reward / 100000000 - this.blockSubsidy;
         }
-        this.stateService.markBlock$.next({ blockHeight: this.blockHeight });
         this.isLoadingOverview = true;
         this.overviewError = null;
 
-        const cachedBlock = this.cacheService.getCachedBlock(block.height);
-        if (!cachedBlock) {
-          this.cacheService.loadBlock(block.height);
-        } else {
-          this.loadedCacheBlock(cachedBlock);
+        if (!block.stale) {
+          this.stateService.markBlock$.next({ blockHeight: this.blockHeight });
+          const cachedBlock = this.cacheService.getCachedBlock(block.height);
+          if (!cachedBlock) {
+            this.cacheService.loadBlock(block.height);
+          } else {
+            this.loadedCacheBlock(cachedBlock);
+          }
         }
       }),
       throttleTime(300, asyncScheduler, { leading: true, trailing: true }),
-      shareReplay(1)
+      shareReplay({ bufferSize: 1, refCount: true })
     );
 
     this.overviewSubscription = this.block$.pipe(
       switchMap((block) => {
         return forkJoin([
+          of(block),
           this.apiService.getStrippedBlockTransactions$(block.id)
             .pipe(
               catchError((err) => {
@@ -300,11 +329,36 @@ export class BlockComponent implements OnInit, OnDestroy {
                 this.overviewError = err;
                 return of(null);
               })
-            )
+            ),
+          block.stale ? this.electrsApiService.getBlockHashFromHeight$(block.height)
+            .pipe(
+              switchMap((hash) => {
+                return forkJoin([
+                  this.apiService.getBlock$(hash).pipe(
+                    catchError((err) => {
+                      console.error('Error fetching canonical block:', err);
+                      this.overviewError = err;
+                      return of(null);
+                    })
+                  ),
+                  this.apiService.getStrippedBlockTransactions$(hash).pipe(
+                    catchError((err) => {
+                      console.error('Error fetching canonical transactions:', err);
+                      this.overviewError = err;
+                      return of(null);
+                    })
+                  )
+                ]);
+              }),
+              catchError((err) => {
+                console.error('Error fetching canonical block:', err);
+                return of([null, null]);
+              })
+            ) : of([null, null]),
         ]);
       })
     )
-    .subscribe(([transactions, blockAudit]) => {
+    .subscribe(([block, transactions, blockAudit, [canonicalBlock, canonicalTransactions]]) => {
       if (transactions) {
         this.strippedTransactions = transactions;
       } else {
@@ -312,13 +366,27 @@ export class BlockComponent implements OnInit, OnDestroy {
       }
       this.blockAudit = blockAudit;
 
+      // Handle canonical block data from the overviewSubscription (when block.stale is true from backend)
+      if (block.stale && canonicalBlock && canonicalTransactions) {
+        this.canonicalBlock = canonicalBlock;
+        this.canonicalTransactions = canonicalTransactions;
+        this.staleTransactions = JSON.parse(JSON.stringify(transactions));
+        this.setupStaleComparison();
+        this.setAuditMode(false);
+      } else if (!block.stale) {
+        // Clear stale-related data when viewing a non-stale block
+        this.staleTransactions = null;
+        this.canonicalBlock = null;
+        this.canonicalTransactions = null;
+      }
+
       this.setupBlockAudit();
       this.isLoadingOverview = false;
     });
 
     this.accelerationsSubscription = this.block$.pipe(
       switchMap((block) => {
-        return this.stateService.env.ACCELERATOR === true && block.height > 819500
+        return this.stateService.env.ACCELERATOR === true && block.height > 819500 && this.stateService.network === ''
           ? this.servicesApiService.getAllAccelerationHistory$({ blockHeight: block.height })
             .pipe(catchError(() => {
               return of([]);
@@ -363,15 +431,22 @@ export class BlockComponent implements OnInit, OnDestroy {
       .subscribe((network) => this.network = network);
 
     this.queryParamsSubscription = this.route.queryParams.subscribe((params) => {
+      this.currentQueryParams = params;
       if (params.showDetails === 'true') {
         this.showDetails = true;
       } else {
         this.showDetails = false;
       }
-      if (params.view === 'projected') {
-        this.mode = 'projected';
-      } else {
-        this.mode = 'actual';
+      switch (params.view) {
+        case 'stale':
+          this.mode = 'stale';
+          break;
+        case 'projected':
+          this.mode = 'projected';
+          break;
+        default:
+          this.mode = 'actual';
+          break;
       }
       this.setupBlockGraphs();
     });
@@ -414,6 +489,8 @@ export class BlockComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.stateService.markBlock$.next({});
     this.overviewSubscription?.unsubscribe();
+    this.canonicalSubscription?.unsubscribe();
+    this.accelerationsSubscription?.unsubscribe();
     this.keyNavigationSubscription?.unsubscribe();
     this.blocksSubscription?.unsubscribe();
     this.cacheBlocksSubscription?.unsubscribe();
@@ -421,8 +498,16 @@ export class BlockComponent implements OnInit, OnDestroy {
     this.queryParamsSubscription?.unsubscribe();
     this.timeLtrSubscription?.unsubscribe();
     this.childChangeSubscription?.unsubscribe();
-    this.priceSubscription?.unsubscribe();
+    this.auditPrefSubscription?.unsubscribe();
+    this.isAuditEnabledSubscription?.unsubscribe();
     this.oobSubscription?.unsubscribe();
+    this.priceSubscription?.unsubscribe();
+    this.blockGraphProjected.forEach(graph => {
+      graph.destroy();
+    });
+    this.blockGraphActual.forEach(graph => {
+      graph.destroy();
+    });
   }
 
   // TODO - Refactor this.fees/this.reward for liquid because it is not
@@ -485,12 +570,134 @@ export class BlockComponent implements OnInit, OnDestroy {
       } else {
         this.showPreviousBlocklink = true;
       }
-      if (this.latestBlock.height && this.latestBlock.height === this.blockHeight) {
+      if (this.latestBlock.height != null && this.latestBlock.height === this.blockHeight) {
         this.showNextBlocklink = false;
       } else {
         this.showNextBlocklink = true;
       }
     }
+  }
+
+  fetchCanonicalBlock(): void {
+    if (!this.block?.stale || !this.block?.height) {
+      return;
+    }
+
+    this.electrsApiService.getBlockHashFromHeight$(this.block.height)
+      .pipe(
+        switchMap((hash) => {
+          return forkJoin([
+            this.apiService.getBlock$(hash).pipe(
+              catchError((err) => {
+                console.error('Error fetching canonical block:', err);
+                this.overviewError = err;
+                return of(null);
+              })
+            ),
+            this.apiService.getStrippedBlockTransactions$(hash).pipe(
+              catchError((err) => {
+                console.error('Error fetching canonical transactions:', err);
+                this.overviewError = err;
+                return of(null);
+              })
+            )
+          ]);
+        }),
+        catchError((err) => {
+          console.error('Error fetching canonical block hash:', err);
+          return of([null, null]);
+        })
+      )
+      .subscribe(([canonicalBlock, canonicalTransactions]) => {
+        this.canonicalBlock = canonicalBlock;
+        this.canonicalTransactions = canonicalTransactions;
+
+        if (canonicalBlock && canonicalTransactions && this.strippedTransactions) {
+          this.staleTransactions = JSON.parse(JSON.stringify(this.strippedTransactions));
+          this.setupStaleComparison();
+          this.setAuditMode(false);
+          this.setupBlockGraphs();
+        }
+      });
+  }
+
+  setupStaleComparison(): void {
+    this.staleStats = {
+      totalFees: 0,
+      totalWeight: 0,
+      totalVsize: 0,
+      txCount: 0,
+      feeDelta: 0,
+      weightDelta: 0,
+      txDelta: 0,
+    };
+    this.canonicalStats = {
+      totalFees: 0,
+      totalWeight: 0,
+      totalVsize: 0,
+      txCount: 0,
+      feeDelta: 0,
+      weightDelta: 0,
+      txDelta: 0,
+    };
+    const staleTransactions = this.staleTransactions || [];
+    const canonicalTransactions = this.canonicalTransactions || [];
+
+    const inStale = {};
+    const inCanonical = {};
+
+    for (const tx of staleTransactions) {
+      inStale[tx.txid] = tx;
+      this.staleStats.totalFees += tx.fee;
+      this.staleStats.totalWeight += tx.vsize * 4;
+      this.staleStats.totalVsize += tx.vsize;
+      this.staleStats.txCount++;
+    }
+    for (const tx of canonicalTransactions) {
+      inCanonical[tx.txid] = tx;
+      this.canonicalStats.totalFees += tx.fee;
+      this.canonicalStats.totalWeight += tx.vsize * 4;
+      this.canonicalStats.totalVsize += tx.vsize;
+      this.canonicalStats.txCount++;
+    }
+
+    for (const tx of staleTransactions) {
+      tx.context = 'stale';
+      if (inCanonical[tx.txid]) {
+        tx.status = 'matched';
+        // opportunistically fix missing timestamps
+        if (inCanonical[tx.txid].time && (!tx.time || tx.time > inCanonical[tx.txid].time)) {
+          tx.time = inCanonical[tx.txid].time;
+        }
+      } else {
+        tx.status = 'unmatched';
+      }
+    }
+
+    for (const tx of canonicalTransactions) {
+      tx.context = 'canonical';
+      if (inStale[tx.txid]) {
+        tx.status = 'matched';
+        // opportunistically fix missing timestamps
+        if (inStale[tx.txid].time && (!tx.time || tx.time > inStale[tx.txid].time)) {
+          tx.time = inStale[tx.txid].time;
+        }
+      } else {
+        tx.status = 'unmatched';
+      }
+    }
+
+    // if vsize was rounded, the total weight we calculated isn't exact and can exceed the 4MB limit
+    this.staleStats.totalWeight = Math.min(this.staleStats.totalWeight, 4_000_000);
+    this.canonicalStats.totalWeight = Math.min(this.canonicalStats.totalWeight, 4_000_000);
+
+    this.staleStats.feeDelta = this.canonicalStats.totalFees > 0 ? (this.staleStats.totalFees - this.canonicalStats.totalFees) / this.canonicalStats.totalFees : (this.canonicalStats.totalFees > 0 ? Infinity : -Infinity);
+    this.staleStats.weightDelta = this.canonicalStats.totalWeight > 0 ? (this.staleStats.totalWeight - this.canonicalStats.totalWeight) / this.canonicalStats.totalWeight : (this.canonicalStats.totalWeight > 0 ? Infinity : -Infinity);
+    this.staleStats.txDelta = this.canonicalStats.txCount > 0 ? (this.staleStats.txCount - this.canonicalStats.txCount) / this.canonicalStats.txCount : (this.canonicalStats.txCount > 0 ? Infinity : -Infinity);
+
+    this.canonicalStats.feeDelta = this.staleStats.totalFees > 0 ? (this.canonicalStats.totalFees - this.staleStats.totalFees) / this.staleStats.totalFees : (this.staleStats.totalFees > 0 ? Infinity : -Infinity);
+    this.canonicalStats.weightDelta = this.staleStats.totalWeight > 0 ? (this.canonicalStats.totalWeight - this.staleStats.totalWeight) / this.staleStats.totalWeight : (this.staleStats.totalWeight > 0 ? Infinity : -Infinity);
+    this.canonicalStats.txDelta = this.staleStats.txCount > 0 ? (this.canonicalStats.txCount - this.staleStats.txCount) / this.staleStats.txCount : (this.staleStats.txCount > 0 ? Infinity : -Infinity);
   }
 
   setupBlockAudit(): void {
@@ -589,7 +796,7 @@ export class BlockComponent implements OnInit, OnDestroy {
         // set transaction statuses
         for (const tx of blockAudit.template) {
           tx.context = 'projected';
-          if (isCensored[tx.txid]) {
+          if (isCensored[tx.txid] && tx.rate >= 1) {
             tx.status = 'censored';
           } else if (inBlock[tx.txid]) {
             tx.status = 'found';
@@ -671,7 +878,20 @@ export class BlockComponent implements OnInit, OnDestroy {
   }
 
   setupBlockGraphs(): void {
-    if (this.blockAudit || this.strippedTransactions) {
+    if (this.block?.stale && !this.showAudit && this.staleTransactions && this.canonicalTransactions) {
+      this.blockGraphProjected.forEach(graph => {
+        graph.destroy();
+        if (this.isMobile && this.mode === 'actual') {
+          graph.setup(this.canonicalTransactions || []);
+        } else {
+          graph.setup(this.staleTransactions || []);
+        }
+      });
+      this.blockGraphActual.forEach(graph => {
+        graph.destroy();
+        graph.setup(this.canonicalTransactions || []);
+      });
+    } else if (this.blockAudit || this.strippedTransactions) {
       this.blockGraphProjected.forEach(graph => {
         graph.destroy();
         if (this.isMobile && this.mode === 'actual') {
@@ -699,7 +919,7 @@ export class BlockComponent implements OnInit, OnDestroy {
     }
   }
 
-  changeMode(mode: 'projected' | 'actual'): void {
+  changeMode(mode: 'projected' | 'actual' | 'stale'): void {
     this.router.navigate([], {
       relativeTo: this.route,
       queryParams: { showDetails: this.showDetails, view: mode },
@@ -733,23 +953,23 @@ export class BlockComponent implements OnInit, OnDestroy {
   toggleAuditMode(): void {
     this.stateService.hideAudit.next(this.auditModeEnabled);
 
-    this.route.queryParams.subscribe(params => {
-      const queryParams = { ...params };
-      delete queryParams['audit'];
+    const queryParams = { ...this.currentQueryParams };
+    delete queryParams['audit'];
 
-      let newUrl = this.router.url.split('?')[0];
-      const queryString = new URLSearchParams(queryParams).toString();
-      if (queryString) {
-        newUrl += '?' + queryString;
-      }
-  
-      this.location.replaceState(newUrl);
-    });
+    let newUrl = this.router.url.split('?')[0];
+    const queryString = new URLSearchParams(queryParams).toString();
+    if (queryString) {
+      newUrl += '?' + queryString;
+    }
+    this.location.replaceState(newUrl);
+  }
 
-    this.auditPrefSubscription = this.stateService.hideAudit.subscribe((hide) => {
-      this.auditModeEnabled = !hide;
-      this.showAudit = this.auditAvailable && this.auditModeEnabled;
-    });
+  setAuditMode(mode: boolean): void {
+    this.auditModeEnabled = mode;
+    this.showAudit = this.auditAvailable && this.auditModeEnabled;
+    if (this.block?.stale) {
+      this.setupBlockGraphs();
+    }
   }
 
   updateAuditAvailableFromBlockHeight(blockHeight: number): void {
@@ -762,7 +982,7 @@ export class BlockComponent implements OnInit, OnDestroy {
     return this.route.queryParams.pipe(
       map(params => {
         this.auditParamEnabled = 'audit' in params;
-        
+
         return this.auditParamEnabled ? !(params['audit'] === 'false') : true;
       })
     );
@@ -814,6 +1034,7 @@ export class BlockComponent implements OnInit, OnDestroy {
     if (this.block && block.height === this.block.height && block.id !== this.block.id) {
       this.block.stale = true;
       this.block.canonical = block.id;
+      this.fetchCanonicalBlock();
     }
   }
 

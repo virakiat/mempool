@@ -1,16 +1,17 @@
-import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Input, OnChanges, OnInit, SimpleChanges } from '@angular/core';
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Input, OnChanges, OnInit, OnDestroy, SimpleChanges } from '@angular/core';
 import { StateService } from '@app/services/state.service';
 import { Address, AddressTxSummary } from '@interfaces/electrs.interface';
 import { ElectrsApiService } from '@app/services/electrs-api.service';
-import { Observable, catchError, of } from 'rxjs';
+import { Observable, Subscription, catchError, of } from 'rxjs';
 
 @Component({
   selector: 'app-balance-widget',
   templateUrl: './balance-widget.component.html',
   styleUrls: ['./balance-widget.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  standalone: false,
 })
-export class BalanceWidgetComponent implements OnInit, OnChanges {
+export class BalanceWidgetComponent implements OnInit, OnChanges, OnDestroy {
   @Input() address: string;
   @Input() addressInfo: Address;
   @Input() addressSummary$: Observable<AddressTxSummary[]> | null;
@@ -22,6 +23,7 @@ export class BalanceWidgetComponent implements OnInit, OnChanges {
   total: number = 0;
   delta7d: number = 0;
   delta30d: number = 0;
+  subscription: Subscription;
 
   constructor(
     public stateService: StateService,
@@ -30,15 +32,23 @@ export class BalanceWidgetComponent implements OnInit, OnChanges {
   ) { }
 
   ngOnInit(): void {
-    
+
   }
 
   ngOnChanges(changes: SimpleChanges): void {
+    if (this.subscription && this.addressInfo && !changes.addressSummary$ && !changes.address && !changes.isPubkey) {
+      this.total = this.addressInfo.chain_stats.funded_txo_sum - this.addressInfo.chain_stats.spent_txo_sum;
+      this.cd.markForCheck();
+      return;
+    }
     this.isLoading = true;
     if (!this.addressSummary$ && (!this.address || !this.addressInfo)) {
       return;
     }
-    (this.addressSummary$ || (this.isPubkey
+    if (this.subscription) {
+      this.subscription.unsubscribe();
+    }
+    this.subscription = (this.addressSummary$ || (this.isPubkey
       ? this.electrsApiService.getScriptHashSummary$((this.address.length === 66 ? '21' : '41') + this.address + 'ac')
       : this.electrsApiService.getAddressSummary$(this.address)).pipe(
       catchError(e => {
@@ -70,5 +80,11 @@ export class BalanceWidgetComponent implements OnInit, OnChanges {
     }
     this.delta7d = weekTotal;
     this.delta30d = monthTotal;
+  }
+
+  ngOnDestroy(): void {
+    if (this.subscription) {
+      this.subscription.unsubscribe();
+    }
   }
 }

@@ -45,6 +45,8 @@ describe('Mempool Backend Config', () => {
         AUDIT: false,
         RUST_GBT: true,
         LIMIT_GBT: false,
+        CLUSTER_MEMPOOL: false,
+        CLUSTER_MEMPOOL_INDEXING: false,
         CPFP_INDEXING: false,
         MAX_BLOCKS_BULK_QUERY: 0,
         DISK_CACHE_BLOCK_INTERVAL: 6,
@@ -52,6 +54,11 @@ describe('Mempool Backend Config', () => {
         ALLOW_UNREACHABLE: true,
         PRICE_UPDATES_PER_HOUR: 1,
         MAX_TRACKED_ADDRESSES: 1,
+        MAX_BUFFERED_AMOUNT: 10000000,
+        MAX_MESSAGE_SIZE: 50000,
+        MAX_TRACKED_TXS: 100,
+        MSG_RATE_LIMIT: 100,
+        MSG_RATE_WINDOW: 10000
       });
 
       expect(config.ELECTRUM).toStrictEqual({ HOST: '127.0.0.1', PORT: 3306, TLS_ENABLED: true });
@@ -144,7 +151,7 @@ describe('Mempool Backend Config', () => {
       });
 
       expect(config.MEMPOOL_SERVICES).toStrictEqual({
-        API: "",
+        API: '',
         ACCELERATIONS: false,
       });
 
@@ -158,6 +165,11 @@ describe('Mempool Backend Config', () => {
         ENABLED: true,
         PAID: false,
         API_KEY: '',
+      });
+
+      expect(config.STRATUM).toStrictEqual({
+        ENABLED: false,
+        API: 'http://localhost:1234',
       });
     });
   });

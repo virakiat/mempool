@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, HostListener, Inject, OnDestroy, On
 import { SeoService } from '@app/services/seo.service';
 import { OpenGraphService } from '@app/services/opengraph.service';
 import { WebsocketService } from '@app/services/websocket.service';
-import { Acceleration, BlockExtended } from '@interfaces/node-api.interface';
+import type { Acceleration, BlockExtended } from '@interfaces/node-api.interface';
 import { StateService } from '@app/services/state.service';
 import { Observable, Subscription, catchError, combineLatest, distinctUntilChanged, map, of, share, switchMap, tap } from 'rxjs';
 import { Color } from '@components/block-overview-graph/sprite-types';
@@ -26,6 +26,7 @@ interface AccelerationBlock extends BlockExtended {
   selector: 'app-accelerator-dashboard',
   templateUrl: './accelerator-dashboard.component.html',
   styleUrls: ['./accelerator-dashboard.component.scss'],
+  standalone: false,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class AcceleratorDashboardComponent implements OnInit, OnDestroy {
@@ -37,7 +38,7 @@ export class AcceleratorDashboardComponent implements OnInit, OnDestroy {
   webGlEnabled = true;
   seen: Set<string> = new Set();
   firstLoad = true;
-  timespan: '24h' | '3d' | '1w' | '1m' | 'all' = '1w';
+  timespan: '24h' | '1m' | '1y' | 'all' = '24h';
 
   accelerationDeltaSubscription: Subscription;
 
@@ -51,7 +52,6 @@ export class AcceleratorDashboardComponent implements OnInit, OnDestroy {
     private serviceApiServices: ServicesApiServices,
     private audioService: AudioService,
     private stateService: StateService,
-    @Inject(PLATFORM_ID) private platformId: Object,
   ) {
     this.webGlEnabled = this.stateService.isBrowser && detectWebGL();
     this.seoService.setTitle($localize`:@@6b867dc61c6a92f3229f1950f9f2d414790cce95:Accelerator Dashboard`);
@@ -153,7 +153,7 @@ export class AcceleratorDashboardComponent implements OnInit, OnDestroy {
       return acceleratedColor;
     } else {
       const rate = tx.fee / tx.vsize; // color by simple single-tx fee rate
-      const feeLevelIndex = feeLevels.findIndex((feeLvl) => Math.max(1, rate) < feeLvl) - 1;
+      const feeLevelIndex = feeLevels.findIndex((feeLvl) => Math.max(0, rate) < feeLvl) - 1;
       return this.theme.theme === 'contrast' || this.theme.theme === 'bukele' ? contrastColors[feeLevelIndex] || contrastColors[contrastColors.length - 1] : normalColors[feeLevelIndex] || normalColors[normalColors.length - 1];
     }
   }

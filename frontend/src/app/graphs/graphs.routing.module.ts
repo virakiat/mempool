@@ -5,6 +5,7 @@ import { BlockFeeRatesGraphComponent } from '@components/block-fee-rates-graph/b
 import { BlockFeesGraphComponent } from '@components/block-fees-graph/block-fees-graph.component';
 import { BlockFeesSubsidyGraphComponent } from '@components/block-fees-subsidy-graph/block-fees-subsidy-graph.component';
 import { BlockRewardsGraphComponent } from '@components/block-rewards-graph/block-rewards-graph.component';
+import { PriceChartComponent } from '@components/price-chart/price-chart.component';
 import { BlockSizesWeightsGraphComponent } from '@components/block-sizes-weights-graph/block-sizes-weights-graph.component';
 import { GraphsComponent } from '@components/graphs/graphs.component';
 import { HashrateChartComponent } from '@components/hashrate-chart/hashrate-chart.component';
@@ -16,23 +17,29 @@ import { PoolRankingComponent } from '@components/pool-ranking/pool-ranking.comp
 import { PoolComponent } from '@components/pool/pool.component';
 import { StartComponent } from '@components/start/start.component';
 import { StatisticsComponent } from '@components/statistics/statistics.component';
-import { TelevisionComponent } from '@components/television/television.component';
 import { DashboardComponent } from '@app/dashboard/dashboard.component';
 import { CustomDashboardComponent } from '@components/custom-dashboard/custom-dashboard.component';
+import { TreasuriesComponent } from '@components/treasuries/treasuries.component';
 import { AccelerationFeesGraphComponent } from '@components/acceleration/acceleration-fees-graph/acceleration-fees-graph.component';
 import { AccelerationsListComponent } from '@components/acceleration/accelerations-list/accelerations-list.component';
 import { AddressComponent } from '@components/address/address.component';
 import { WalletComponent } from '@components/wallet/wallet.component';
+import { CalculatorComponent } from '@components/calculator/calculator.component';
+import { BlockGogglesGraphComponent } from '@components/block-goggles-graph/block-goggles-graph.component';
 
 const browserWindow = window || {};
 // @ts-ignore
 const browserWindowEnv = browserWindow.__env || {};
-const isCustomized = browserWindowEnv?.customize;
+const isCustomized = browserWindowEnv?.customize?.dashboard;
 
 const routes: Routes = [
   {
     path: '',
     children: [
+      {
+        path: 'tools/calculator',
+        component: CalculatorComponent
+      },
       {
         path: 'mining/pool/:slug',
         data: { networks: ['bitcoin'] },
@@ -109,6 +116,11 @@ const routes: Routes = [
             component: StatisticsComponent,
           },
           {
+            path: 'goggles',
+            data: { networks: [ 'bitcoin' ]},
+            component: BlockGogglesGraphComponent,
+          },
+          {
             path: 'mining/hashrate-difficulty',
             data: { networks: ['bitcoin'] },
             component: HashrateChartComponent,
@@ -130,7 +142,7 @@ const routes: Routes = [
           },
           {
             path: 'mining/block-fees-subsidy',
-            data: { networks: ['bitcoin'] },
+            data: { networks: ['bitcoin'], networkSpecific: true, onlySubnet: [''] },
             component: BlockFeesSubsidyGraphComponent,
           },
           {
@@ -168,6 +180,11 @@ const routes: Routes = [
             data: { networks: ['bitcoin'] },
             component: BlockHealthGraphComponent,
           },
+          {
+            path: 'price',
+            data: { networks: ['bitcoin'], networkSpecific: true, onlySubnet: [''] },
+            component: PriceChartComponent,
+          },
         ]
       },
       {
@@ -180,12 +197,22 @@ const routes: Routes = [
       },
     ]
   },
-  {
-    path: 'tv',
-    data: { networks: ['bitcoin', 'liquid'] },
-    component: TelevisionComponent
-  },
 ];
+
+if (window['__env']?.OFFICIAL_MEMPOOL_SPACE) {
+  routes[0].children?.push({
+    path: 'treasuries',
+    component: StartComponent,
+    children: [{
+      path: '',
+      component: TreasuriesComponent,
+      data: {
+        networks: ['bitcoin'],
+        networkSpecific: true,
+      },
+    }]
+  });
+}
 
 @NgModule({
   imports: [RouterModule.forChild(routes)],

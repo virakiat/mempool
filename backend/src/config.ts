@@ -6,7 +6,7 @@ interface IConfig {
   MEMPOOL: {
     ENABLED: boolean;
     OFFICIAL: boolean;
-    NETWORK: 'mainnet' | 'testnet' | 'signet' | 'liquid' | 'liquidtestnet';
+    NETWORK: 'mainnet' | 'testnet' | 'testnet4' | 'signet' | 'liquid' | 'liquidtestnet' | 'regtest';
     BACKEND: 'esplora' | 'electrum' | 'none';
     HTTP_PORT: number;
     UNIX_SOCKET_PATH: string;
@@ -34,6 +34,8 @@ interface IConfig {
     POOLS_JSON_TREE_URL: string,
     POOLS_UPDATE_DELAY: number,
     AUDIT: boolean;
+    CLUSTER_MEMPOOL: boolean;
+    CLUSTER_MEMPOOL_INDEXING: boolean;
     RUST_GBT: boolean;
     LIMIT_GBT: boolean;
     CPFP_INDEXING: boolean;
@@ -43,6 +45,11 @@ interface IConfig {
     ALLOW_UNREACHABLE: boolean;
     PRICE_UPDATES_PER_HOUR: number;
     MAX_TRACKED_ADDRESSES: number;
+    MAX_BUFFERED_AMOUNT: number;
+    MAX_MESSAGE_SIZE: number;
+    MAX_TRACKED_TXS: number;
+    MSG_RATE_LIMIT: number;
+    MSG_RATE_WINDOW: number;
   };
   ESPLORA: {
     REST_API_URL: string;
@@ -57,7 +64,6 @@ interface IConfig {
   LIGHTNING: {
     ENABLED: boolean;
     BACKEND: 'lnd' | 'cln' | 'ldk';
-    TOPOLOGY_FOLDER: string;
     STATS_REFRESH_INTERVAL: number;
     GRAPH_REFRESH_INTERVAL: number;
     LOGGER_UPDATE_INTERVAL: number;
@@ -164,7 +170,12 @@ interface IConfig {
   },
   WALLETS: {
     ENABLED: boolean;
+    AUTO: boolean;
     WALLETS: string[];
+  },
+  STRATUM: {
+    ENABLED: boolean;
+    API: string;
   }
 }
 
@@ -200,6 +211,8 @@ const defaults: IConfig = {
     'POOLS_JSON_TREE_URL': 'https://api.github.com/repos/mempool/mining-pools/git/trees/master',
     'POOLS_UPDATE_DELAY': 604800, // in seconds, default is one week
     'AUDIT': false,
+    'CLUSTER_MEMPOOL': false,
+    'CLUSTER_MEMPOOL_INDEXING': false,
     'RUST_GBT': true,
     'LIMIT_GBT': false,
     'CPFP_INDEXING': false,
@@ -209,6 +222,11 @@ const defaults: IConfig = {
     'ALLOW_UNREACHABLE': true,
     'PRICE_UPDATES_PER_HOUR': 1,
     'MAX_TRACKED_ADDRESSES': 1,
+    'MAX_BUFFERED_AMOUNT': 10_000_000,
+    'MAX_MESSAGE_SIZE': 50_000,
+    'MAX_TRACKED_TXS': 100,
+    'MSG_RATE_LIMIT': 100,
+    'MSG_RATE_WINDOW': 10_000,
   },
   'ESPLORA': {
     'REST_API_URL': 'http://127.0.0.1:3000',
@@ -270,7 +288,6 @@ const defaults: IConfig = {
   'LIGHTNING': {
     'ENABLED': false,
     'BACKEND': 'lnd',
-    'TOPOLOGY_FOLDER': '',
     'STATS_REFRESH_INTERVAL': 600,
     'GRAPH_REFRESH_INTERVAL': 600,
     'LOGGER_UPDATE_INTERVAL': 30,
@@ -330,8 +347,13 @@ const defaults: IConfig = {
   },
   'WALLETS': {
     'ENABLED': false,
+    'AUTO': false,
     'WALLETS': [],
   },
+  'STRATUM': {
+    'ENABLED': false,
+    'API': 'http://localhost:1234',
+  }
 };
 
 class Config implements IConfig {
@@ -354,6 +376,7 @@ class Config implements IConfig {
   REDIS: IConfig['REDIS'];
   FIAT_PRICE: IConfig['FIAT_PRICE'];
   WALLETS: IConfig['WALLETS'];
+  STRATUM: IConfig['STRATUM'];
 
   constructor() {
     const configs = this.merge(configFromFile, defaults);
@@ -376,6 +399,7 @@ class Config implements IConfig {
     this.REDIS = configs.REDIS;
     this.FIAT_PRICE = configs.FIAT_PRICE;
     this.WALLETS = configs.WALLETS;
+    this.STRATUM = configs.STRATUM;
   }
 
   merge = (...objects: object[]): IConfig => {
@@ -386,7 +410,7 @@ class Config implements IConfig {
       });
       return next;
     });
-  }
+  };
 }
 
 export default new Config();

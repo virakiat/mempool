@@ -1,5 +1,6 @@
 import express from 'express';
 import { Application, Request, Response, NextFunction } from 'express';
+import * as fs from 'fs';
 import * as http from 'http';
 import * as WebSocket from 'ws';
 import bitcoinApi from './api/bitcoin/bitcoin-api-factory';
@@ -44,10 +45,10 @@ import redisCache from './api/redis-cache';
 import accelerationApi from './api/services/acceleration';
 import bitcoinCoreRoutes from './api/bitcoin/bitcoin-core.routes';
 import bitcoinSecondClient from './api/bitcoin/bitcoin-second-client';
-import accelerationRoutes from './api/acceleration/acceleration.routes';
 import aboutRoutes from './api/about.routes';
 import mempoolBlocks from './api/mempool-blocks';
 import walletApi from './api/services/wallets';
+import stratumApi from './api/services/stratum';
 
 class Server {
   private wss: WebSocket.Server | undefined;
@@ -65,9 +66,14 @@ class Server {
 
   constructor() {
     this.app = express();
+    this.app.set('case sensitive routing', true);
+
+    if (cluster.isPrimary && config.MEMPOOL.UNIX_SOCKET_PATH) {
+      this.clearStaleUnixSocket(config.MEMPOOL.UNIX_SOCKET_PATH);
+    }
 
     if (!config.MEMPOOL.SPAWN_CLUSTER_PROCS) {
-      this.startServer();
+      void this.startServer();
       return;
     }
 
@@ -91,22 +97,29 @@ class Server {
         }, 10000);
       });
     } else {
-      this.startServer(true);
+      void this.startServer(true);
     }
   }
 
+  /** @asyncSafe */
   async startServer(worker = false): Promise<void> {
     logger.notice(`Starting Mempool Server${worker ? ' (worker)' : ''}... (${backendInfo.getShortCommitHash()})`);
 
     // Register cleanup listeners for exit events
-    ['exit', 'SIGHUP', 'SIGINT', 'SIGTERM', 'SIGUSR1', 'SIGUSR2'].forEach(event => {
-      process.on(event, () => { this.onExit(event); });
+    ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGUSR1', 'SIGUSR2'].forEach(event => {
+      process.on(event, () => { this.forceExit(event); });
+    });
+    process.on('exit', () => {
+      logger.debug(`'exit' event triggered`);
+      this.exitCleanup();
     });
     process.on('uncaughtException', (error) => {
-      this.onUnhandledException('uncaughtException', error);
+      console.error(`uncaughtException:`, error);
+      this.forceExit('uncaughtException', 1);
     });
     process.on('unhandledRejection', (reason, promise) => {
-      this.onUnhandledException('unhandledRejection', reason);
+      console.error(`unhandledRejection:`, reason, promise);
+      this.forceExit('unhandledRejection', 1);
     });
 
     if (config.MEMPOOL.BACKEND === 'esplora') {
@@ -130,34 +143,53 @@ class Server {
     this.app
       .use((req: Request, res: Response, next: NextFunction) => {
         res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Requested-With');
+        res.setHeader('Access-Control-Expose-Headers', 'X-Total-Count,X-Mempool-Auth');
         next();
       })
-      .use(express.urlencoded({ extended: true }))
-      .use(express.text({ type: ['text/plain', 'application/base64'] }))
-      .use(express.json())
+      .use(express.urlencoded({ extended: true, limit: '10mb' }))
+      .use(express.text({ type: ['text/plain', 'application/base64'], limit: '10mb' }))
+      .use(express.json({ limit: '10mb' }))
       ;
 
     if (config.DATABASE.ENABLED && config.FIAT_PRICE.ENABLED) {
+      /** @asyncUnsafe */
       await priceUpdater.$initializeLatestPriceWithDb();
     }
 
     this.server = http.createServer(this.app);
-    this.wss = new WebSocket.Server({ server: this.server });
+    this.wss = new WebSocket.Server({ server: this.server, maxPayload: websocketHandler.MAX_MESSAGE_SIZE });
     if (config.MEMPOOL.UNIX_SOCKET_PATH) {
       this.serverUnixSocket = http.createServer(this.app);
-      this.wssUnixSocket = new WebSocket.Server({ server: this.serverUnixSocket });
+      this.wssUnixSocket = new WebSocket.Server({ server: this.serverUnixSocket, maxPayload: websocketHandler.MAX_MESSAGE_SIZE });
     }
 
     this.setUpWebsocketHandling();
 
     await poolsUpdater.updatePoolsJson(); // Needs to be done before loading the disk cache because we sometimes wipe it
+    if (config.DATABASE.ENABLED === true && config.MEMPOOL.ENABLED && ['mainnet', 'testnet', 'signet', 'testnet4', 'regtest'].includes(config.MEMPOOL.NETWORK) && !poolsUpdater.currentSha) {
+      logger.err(`Failed to retrieve pools-v2.json sha, cannot run block indexing. Please make sure you've set valid urls in your mempool-config.json::MEMPOOL::POOLS_JSON_URL and mempool-config.json::MEMPOOL::POOLS_JSON_TREE_UR, aborting now`);
+      return process.exit(1);
+    }
+
     await syncAssets.syncAssets$();
-    await mempoolBlocks.updatePools$();
+    if (config.DATABASE.ENABLED) {
+      /** @asyncUnsafe */
+      await mempoolBlocks.updatePools$();
+    }
     if (config.MEMPOOL.ENABLED) {
       if (config.MEMPOOL.CACHE_ENABLED) {
         await diskCache.$loadMempoolCache();
       } else if (config.REDIS.ENABLED) {
-        await redisCache.$loadCache();
+        let currentMempoolTxids: Set<string> | undefined;
+        try {
+          currentMempoolTxids = new Set(await bitcoinApi.$getRawMempool());
+        } catch (e) {
+          logger.warn(`Failed to fetch raw mempool before loading Redis cache. Reason: ${e instanceof Error ? e.message : e}`);
+        }
+        /** @asyncUnsafe */
+        await redisCache.$loadCache(currentMempoolTxids);
       }
     }
 
@@ -180,20 +212,21 @@ class Server {
     }
 
     if (config.FIAT_PRICE.ENABLED) {
-      priceUpdater.$run();
+      void priceUpdater.$run();
     }
     await chainTips.updateOrphanedBlocks();
 
     this.setUpHttpApiRoutes();
 
     if (config.MEMPOOL.ENABLED) {
-      this.runMainUpdateLoop();
+      void this.runMainUpdateLoop();
+      indexer.scheduleSingleTask('poolsStats', 0);
     }
 
     setInterval(() => { this.healthCheck(); }, 2500);
 
     if (config.LIGHTNING.ENABLED) {
-      this.$runLightningBackend();
+      void this.$runLightningBackend();
     }
 
     this.server.listen(config.MEMPOOL.HTTP_PORT, () => {
@@ -203,6 +236,8 @@ class Server {
         logger.notice(`Mempool Server is running on port ${config.MEMPOOL.HTTP_PORT}`);
       }
     });
+    this.server.keepAliveTimeout = 70 * 1000;
+    this.server.headersTimeout = 71 * 1000;
 
     if (this.serverUnixSocket) {
       this.serverUnixSocket.listen(config.MEMPOOL.UNIX_SOCKET_PATH, () => {
@@ -212,11 +247,26 @@ class Server {
           logger.notice(`Mempool Server is listening on ${config.MEMPOOL.UNIX_SOCKET_PATH}`);
         }
       });
+
+      this.serverUnixSocket.keepAliveTimeout = 70 * 1000;
+      this.serverUnixSocket.headersTimeout = 71 * 1000;
     }
 
-    poolsUpdater.$startService();
+    void poolsUpdater.$startService();
   }
 
+  clearStaleUnixSocket(path: string): void {
+    try {
+      if (fs.existsSync(path)) {
+        fs.unlinkSync(path);
+        logger.notice(`Removed stale unix socket ${path}`);
+      }
+    } catch (e) {
+      logger.err(`Failed to remove stale unix socket ${path}. Reason: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** @asyncSafe */
   async runMainUpdateLoop(): Promise<void> {
     const start = Date.now();
     try {
@@ -235,17 +285,18 @@ class Server {
       const minFeeTip = memPool.limitGBT ? await bitcoinSecondClient.getBlockCount() : -1;
       const latestAccelerations = await accelerationApi.$updateAccelerations();
       const numHandledBlocks = await blocks.$updateBlocks();
+      await poolsUpdater.$recheckBlocks();
       const pollRate = config.MEMPOOL.POLL_RATE_MS * (indexer.indexerIsRunning() ? 10 : 1);
       if (numHandledBlocks === 0) {
         await memPool.$updateMempool(newMempool, latestAccelerations, minFeeMempool, minFeeTip, pollRate);
       }
-      indexer.$run();
+      void indexer.$run();
       if (config.WALLETS.ENABLED) {
         // might take a while, so run in the background
-        walletApi.$syncWallets();
+        void walletApi.$syncWallets();
       }
       if (config.FIAT_PRICE.ENABLED) {
-        priceUpdater.$run();
+        void priceUpdater.$run();
       }
 
       // rerun immediately if we skipped the mempool update, otherwise wait POLL_RATE_MS
@@ -277,6 +328,7 @@ class Server {
     }
   }
 
+  /** @asyncSafe */
   async $runLightningBackend(): Promise<void> {
     try {
       await fundingTxFetcher.$init();
@@ -286,7 +338,7 @@ class Server {
     } catch(e) {
       logger.err(`Exception in $runLightningBackend. Restarting in 1 minute. Reason: ${(e instanceof Error ? e.message : e)}`);
       await Common.sleep$(1000 * 60);
-      this.$runLightningBackend();
+      void this.$runLightningBackend();
     };
   }
 
@@ -299,32 +351,39 @@ class Server {
     }
 
     if (Common.isLiquid() && config.DATABASE.ENABLED) {
-      blocks.setNewBlockCallback(async () => {
+      /** @asyncSafe */
+      const parseElements = async (): Promise<void> => {
         try {
           await elementsParser.$parse();
-          await elementsParser.$updateFederationUtxos();
         } catch (e) {
           logger.warn('Elements parsing error: ' + (e instanceof Error ? e.message : e));
         }
-      });
+      };
+      blocks.setNewBlockCallback(parseElements);
+      void parseElements();
+      setInterval(() => { void parseElements(); }, 60_000);
     }
     websocketHandler.setupConnectionHandling();
     if (config.MEMPOOL.ENABLED) {
       statistics.setNewStatisticsEntryCallback(websocketHandler.handleNewStatistic.bind(websocketHandler));
       memPool.setAsyncMempoolChangedCallback(websocketHandler.$handleMempoolChange.bind(websocketHandler));
-      blocks.setNewAsyncBlockCallback(websocketHandler.handleNewBlock.bind(websocketHandler));
     }
     if (config.FIAT_PRICE.ENABLED) {
       priceUpdater.setRatesChangedCallback(websocketHandler.handleNewConversionRates.bind(websocketHandler));
     }
     loadingIndicators.setProgressChangedCallback(websocketHandler.handleLoadingChanged.bind(websocketHandler));
 
-    accelerationApi.connectWebsocket();
+    void accelerationApi.connectWebsocket();
+    if (config.STRATUM.ENABLED) {
+      void stratumApi.connectWebsocket();
+    }
   }
 
   setUpHttpApiRoutes(): void {
     bitcoinRoutes.initRoutes(this.app);
-    bitcoinCoreRoutes.initRoutes(this.app);
+    if (config.MEMPOOL.OFFICIAL) {
+      bitcoinCoreRoutes.initRoutes(this.app);
+    }
     pricesRoutes.initRoutes(this.app);
     if (config.STATISTICS.ENABLED && config.DATABASE.ENABLED && config.MEMPOOL.ENABLED) {
       statisticsRoutes.initRoutes(this.app);
@@ -339,9 +398,6 @@ class Server {
       generalLightningRoutes.initRoutes(this.app);
       nodesRoutes.initRoutes(this.app);
       channelsRoutes.initRoutes(this.app);
-    }
-    if (config.MEMPOOL_SERVICES.ACCELERATIONS) {
-      accelerationRoutes.initRoutes(this.app);
     }
     if (config.WALLETS.ENABLED) {
       servicesRoutes.initRoutes(this.app);
@@ -368,11 +424,29 @@ class Server {
       this.warnedHeapCritical = false;
       this.maxHeapSize = 0;
       this.lastHeapLogTime = now;
+      this.server?.getConnections((error, count) => {
+        if (!error) {
+          logger.debug(`${count} open TCP sockets`);
+        }
+      });
+      this.serverUnixSocket?.getConnections((error, count) => {
+        if (!error) {
+          logger.debug(`${count} open unix sockets`);
+        }
+      });
     }
   }
 
-  onExit(exitEvent, code = 0): void {
-    logger.debug(`onExit for signal: ${exitEvent}`);
+  forceExit(exitEvent, code?: number): void {
+    logger.debug(`triggering exit for signal: ${exitEvent}`);
+    if (code != null) {
+      // override the default exit code
+      process.exitCode = code;
+    }
+    process.exit();
+  }
+
+  exitCleanup(): void {
     if (config.DATABASE.ENABLED) {
       DB.releasePidLock();
     }
@@ -382,12 +456,6 @@ class Server {
     if (this.wssUnixSocket) {
       this.wssUnixSocket.close();
     }
-    process.exit(code);
-  }
-
-  onUnhandledException(type, error): void {
-    console.error(`${type}:`, error);
-    this.onExit(type, 1);
   }
 }
 

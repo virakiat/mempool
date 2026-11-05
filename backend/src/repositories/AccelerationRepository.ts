@@ -31,6 +31,7 @@ export interface PublicAcceleration {
 class AccelerationRepository {
   private bidBoostV2Activated = 831580;
 
+  /** @asyncSafe */
   public async $saveAcceleration(acceleration: AccelerationInfo, block: IEsploraApi.Block, pool_id: number, accelerationData: Acceleration[]): Promise<void> {
     const accelerationMap: { [txid: string]: Acceleration } = {};
     for (const acc of accelerationData) {
@@ -74,7 +75,7 @@ class AccelerationRepository {
       SELECT *, UNIX_TIMESTAMP(requested) as requested_timestamp, UNIX_TIMESTAMP(added) as block_timestamp FROM accelerations
       JOIN pools on pools.unique_id = accelerations.pool
     `;
-    let params: any[] = [];
+    const params: any[] = [];
     let hasFilter = false;
 
     if (interval && height === null) {
@@ -137,7 +138,7 @@ class AccelerationRepository {
       SELECT SUM(boost_cost) as total_cost, COUNT(txid) as count FROM accelerations
       JOIN pools on pools.unique_id = accelerations.pool
     `;
-    let params: any[] = [];
+    const params: any[] = [];
     let hasFilter = false;
 
     if (interval) {
@@ -165,6 +166,7 @@ class AccelerationRepository {
     }
   }
 
+  /** @asyncSafe */
   public async $getLastSyncedHeight(): Promise<number> {
     try {
       const [rows] = await DB.query(`
@@ -180,6 +182,7 @@ class AccelerationRepository {
     return 0;
   }
 
+  /** @asyncSafe */
   private async $setLastSyncedHeight(height: number): Promise<void> {
     try {
       await DB.query(`
@@ -193,6 +196,7 @@ class AccelerationRepository {
   }
 
   // modifies block transactions
+  /** @asyncSafe */
   public async $indexAccelerationsForBlock(block: BlockExtended, accelerations: Acceleration[], transactions: MempoolTransactionExtended[]): Promise<void> {
     const blockTxs: { [txid: string]: MempoolTransactionExtended } = {};
     for (const tx of transactions) {
@@ -211,7 +215,7 @@ class AccelerationRepository {
         const tx = blockTxs[acc.txid];
         const accelerationInfo = accelerationCosts.getAccelerationInfo(tx, boostRate, transactions);
         accelerationInfo.cost = Math.max(0, Math.min(acc.feeDelta, accelerationInfo.cost));
-        this.$saveAcceleration(accelerationInfo, block, block.extras.pool.id, successfulAccelerations);
+        void this.$saveAcceleration(accelerationInfo, block, block.extras.pool.id, successfulAccelerations);
       }
     }
     let anyConfirmed = false;
@@ -256,7 +260,7 @@ class AccelerationRepository {
     try {
       while (!done) {
         // don't DDoS the services backend
-        Common.sleep$(500 + (Math.random() * 1000));
+        await Common.sleep$(500 + (Math.random() * 1000));
         const accelerations = await accelerationApi.$fetchAccelerationHistory(page);
         page++;
         if (!accelerations?.length) {
@@ -320,7 +324,7 @@ class AccelerationRepository {
         const accelerationSummaries = accelerations.map(acc => ({
           ...acc,
           pools: acc.pools,
-        }))
+        }));
         for (const acc of accelerations) {
           if (blockTxs[acc.txid] && acc.pools.includes(block.extras.pool.id)) {
             const tx = blockTxs[acc.txid];
@@ -360,6 +364,46 @@ class AccelerationRepository {
     } catch (e) {
       logger.err('Cannot delete indexed accelerations. Reason: ' + (e instanceof Error ? e.message : e));
     }
+  }
+
+  /**
+   * Retrieves transactions IDs between two heights
+   * @asyncSafe */
+  public async $getAccelerationsBetween(from: number, to: number): Promise<string[]> {
+    try {
+      const [rows]: any[] = await DB.query('SELECT txid FROM accelerations WHERE height > ? AND height <= ?', [from, to]);
+
+      if (rows.length > 0) {
+        return rows.map((row) => row.txid);
+      }
+    } catch (e) {
+      logger.err(`Failed to get accelerations between #${from} and #${to}. Reason: ` + (e instanceof Error ? e.message : e));
+    }
+    return [];
+  }
+
+  /** @asyncSafe */
+  public async $getAccelerationCountsPerBucket(bucketSize: number, from: number, to: number): Promise<Record<string, number>> {
+    try {
+      const [rows]: any[]= await DB.query(`
+        SELECT FLOOR(height / ?) * ? AS startHeight, 
+        COUNT(*) AS count
+        FROM accelerations
+        WHERE height > ? AND height <= ?
+        GROUP BY startHeight
+        `, [bucketSize, bucketSize, from, to]);
+
+      const counts = {};
+      if (rows.length > 0) {
+        for (const row of rows) {
+          counts[row.startHeight] = row.count;
+        }
+        return counts;
+      }
+    } catch (e) {
+      logger.err(`Failed to get acceleration counts per ${bucketSize} blocks. Reason: ` + (e instanceof Error ? e.message : e));
+    }
+    return {};
   }
 }
 

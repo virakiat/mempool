@@ -17,6 +17,7 @@ export interface PoolInfo {
   name: string;
   link: string;
   blockCount: number;
+  emptyBlocks: number;
   slug: string;
   avgMatchRate: number | null;
   avgFeeDelta: number | null;
@@ -25,7 +26,11 @@ export interface PoolInfo {
 
 export interface PoolStats extends PoolInfo {
   rank: number;
-  emptyBlocks: number;
+}
+
+export enum TemplateAlgorithm {
+  legacy = 0,
+  clusterMempool = 1,
 }
 
 export interface BlockAudit {
@@ -45,6 +50,7 @@ export interface BlockAudit {
   expectedFees?: number,
   expectedWeight?: number,
   template?: any[];
+  templateAlgorithm?: TemplateAlgorithm,
 }
 
 export interface TransactionAudit {
@@ -132,6 +138,8 @@ export interface TransactionExtended extends IEsploraApi.Transaction {
   replacement?: boolean;
   uid?: number;
   flags?: number;
+  clusterId?: number;
+  chunkIndex?: number;
 }
 
 export interface MempoolTransactionExtended extends TransactionExtended {
@@ -227,6 +235,7 @@ export interface CpfpInfo {
   adjustedVsize?: number,
   acceleration?: boolean,
   fee?: number;
+  cluster?: CpfpClusterData & { chunkIndex: number };
 }
 
 export interface TransactionStripped {
@@ -269,11 +278,13 @@ export const TransactionFlags = {
   cpfp_parent:                               0b00000001_00000000_00000000n,
   cpfp_child:                                0b00000010_00000000_00000000n,
   replacement:                               0b00000100_00000000_00000000n,
+  acceleration:                              0b00001000_00000000_00000000n,
   // data
   op_return:                        0b00000001_00000000_00000000_00000000n,
   fake_pubkey:                      0b00000010_00000000_00000000_00000000n,
   inscription:                      0b00000100_00000000_00000000_00000000n,
   fake_scripthash:                  0b00001000_00000000_00000000_00000000n,
+  annex:                            0b00010000_00000000_00000000_00000000n,
   // heuristics
   coinjoin:                0b00000001_00000000_00000000_00000000_00000000n,
   consolidation:           0b00000010_00000000_00000000_00000000_00000000n,
@@ -309,6 +320,7 @@ export interface BlockExtension {
   coinbaseAddresses: string[] | null;
   coinbaseSignature: string | null;
   coinbaseSignatureAscii: string | null;
+  coinbaseBip54: boolean | null;
   virtualSize: number;
   avgTxSize: number;
   totalInputs: number;
@@ -325,6 +337,8 @@ export interface BlockExtension {
   // Requires coinstatsindex, will be set to NULL otherwise
   utxoSetSize: number | null;
   totalInputAmt: number | null;
+  // pools-v2.json git hash
+  definitionHash: string | undefined;
 }
 
 /**
@@ -334,6 +348,7 @@ export interface BlockExtension {
 export interface BlockExtended extends IEsploraApi.Block {
   extras: BlockExtension;
   canonical?: string;
+  indexVersion?: number;
 }
 
 export interface BlockSummary {
@@ -384,6 +399,25 @@ export interface CpfpCluster {
   height: number,
   txs: Ancestor[],
   effectiveFeePerVsize: number,
+  templateAlgorithm?: TemplateAlgorithm,
+  clusterData?: CpfpClusterData,
+}
+
+export interface CpfpClusterTx {
+  txid: string;
+  fee: number;
+  weight: number;
+  parents: number[];
+}
+
+export interface CpfpClusterChunk {
+  txs: number[];
+  feerate: number;
+}
+
+export interface CpfpClusterData {
+  txs: CpfpClusterTx[];
+  chunks: CpfpClusterChunk[];
 }
 
 export interface CpfpSummary {
@@ -403,6 +437,7 @@ export interface Statistic {
   fee_data: string;
   min_fee: number;
 
+  vsize_0: number;
   vsize_1: number;
   vsize_2: number;
   vsize_3: number;
@@ -499,7 +534,34 @@ export interface IBackendInfo {
   gitCommit: string;
   version: string;
   lightning: boolean;
+  coreVersion: string;
+  osVersion: string;
   backend: 'esplora' | 'electrum' | 'none';
+}
+
+export interface INetworkInfo {
+    version: number;
+    subversion: string;
+    protocolversion: number;
+    localservices: string;
+    localrelay: boolean;
+    timeoffset: number;
+    networkactive: boolean;
+    networks: {
+      name: string;
+      limited: boolean;
+      reachable: boolean;
+      proxy: string;
+      proxy_randomize_credentials: boolean;
+    }[];
+    relayfee: number;
+    incrementalfee: number;
+    localaddresses: {
+      address: string;
+      port: number;
+      score: number;
+    }[];
+    warnings: string;
 }
 
 export interface IDifficultyAdjustment {

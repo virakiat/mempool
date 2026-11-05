@@ -1,7 +1,7 @@
 import { Application, Request, Response } from 'express';
 import config from '../../config';
 import statisticsApi from './statistics-api';
-
+import { handleError } from '../../utils/api';
 class StatisticsRoutes {
   public initRoutes(app: Application) {
     app
@@ -22,7 +22,6 @@ class StatisticsRoutes {
   private async $getStatisticsByTime(time: '2h' | '24h' | '1w' | '1m' | '3m' | '6m' | '1y' | '2y' | '3y' | '4y' | 'all', req: Request, res: Response) {
     res.header('Pragma', 'public');
     res.header('Cache-control', 'public');
-    res.setHeader('Expires', new Date(Date.now() + 1000 * 300).toUTCString());
 
     try {
       let result;
@@ -63,9 +62,14 @@ class StatisticsRoutes {
           res.setHeader('Expires', new Date(Date.now() + 1000 * 30).toUTCString());
           break;
       }
+
+      if (!res.hasHeader('Expires')) {
+        res.setHeader('Expires', new Date(Date.now() + 1000 * 300).toUTCString());
+      }
+
       res.json(result);
     } catch (e) {
-      res.status(500).send(e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get statistics');
     }
   }
 }

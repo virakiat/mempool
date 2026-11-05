@@ -93,7 +93,7 @@ class HashratesRepository {
       const [rows]: any[] = await DB.query(query);
       return rows.map(row => row.timestamp);
     } catch (e) {
-      logger.err('Cannot retreive indexed weekly hashrate timestamps. Reason: ' + (e instanceof Error ? e.message : e), logger.tags.mining);
+      logger.err('Cannot retrieve indexed weekly hashrate timestamps. Reason: ' + (e instanceof Error ? e.message : e), logger.tags.mining);
       throw e;
     }
   }
@@ -211,11 +211,12 @@ class HashratesRepository {
       // Re-run the hashrate indexing to fill up missing data
       mining.lastHashrateIndexingDate = null;
       mining.lastWeeklyHashrateIndexingDate = null;
+      void mining.invalidatePoolsHistoricalHashrateCache();
     } catch (e) {
       logger.err('Cannot delete latest hashrates data points. Reason: ' + (e instanceof Error ? e.message : e), logger.tags.mining);
     }
   }
-  
+
   /**
    * Delete hashrates from the database from timestamp
    */
@@ -227,6 +228,7 @@ class HashratesRepository {
       // Re-run the hashrate indexing to fill up missing data
       mining.lastHashrateIndexingDate = null;
       mining.lastWeeklyHashrateIndexingDate = null;
+      void mining.invalidatePoolsHistoricalHashrateCache();
     } catch (e) {
       logger.err('Cannot delete latest hashrates data points. Reason: ' + (e instanceof Error ? e.message : e), logger.tags.mining);
     }

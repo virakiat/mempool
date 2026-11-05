@@ -23,11 +23,14 @@ class RedisCache {
 
   private pauseFlush: boolean = false;
   private cacheQueue: MempoolTransactionExtended[] = [];
-  private removeQueue: string[] = [];
+  private removeQueue = new Set<string>();
+  private removeQueueFlushInProgress: boolean = false;
   private rbfCacheQueue: { type: string, txid: string, value: any }[] = [];
   private rbfRemoveQueue: { type: string, txid: string }[] = [];
   private txFlushLimit: number = 10000;
   private ignoreBlocksCache = false;
+  private reconciliationInProgress: boolean = false;
+  private reconciliationCursor: string = '0';
 
   constructor() {
     if (config.REDIS.ENABLED) {
@@ -37,11 +40,13 @@ class RedisCache {
         },
         database: NetworkDB[config.MEMPOOL.NETWORK],
       };
-      this.$ensureConnected();
-      setInterval(() => { this.$ensureConnected(); }, 10000);
+      void this.$ensureConnected();
+      setInterval(() => { void this.$ensureConnected(); }, 10000);
+      setInterval(() => { void this.$reconcileMempoolTransactions(); }, 30000);
     }
   }
 
+  /** @asyncSafe */
   private async $ensureConnected(): Promise<boolean> {
     if (!this.connected && config.REDIS.ENABLED) {
       try {
@@ -91,10 +96,11 @@ class RedisCache {
 
   private async $onConnected(): Promise<void> {
     await this.$flushTransactions();
-    await this.$removeTransactions([]);
+    await this.$removeTransactions();
     await this.$flushRbfQueues();
   }
 
+  /** @asyncSafe */
   async $updateBlocks(blocks: BlockExtended[]): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
@@ -127,10 +133,12 @@ class RedisCache {
     }
   }
 
+  /** @asyncSafe */
   async $addTransaction(tx: MempoolTransactionExtended): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
     }
+    this.removeQueue.delete(tx.txid);
     this.cacheQueue.push(tx);
     if (this.cacheQueue.length >= this.txFlushLimit) {
       if (!this.pauseFlush) {
@@ -139,6 +147,7 @@ class RedisCache {
     }
   }
 
+  /** @asyncSafe */
   async $flushTransactions(): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
@@ -178,34 +187,92 @@ class RedisCache {
     }
   }
 
-  async $removeTransactions(transactions: string[]): Promise<void> {
+  queueTransactionsForRemoval(transactions: string[]): void {
     if (!config.REDIS.ENABLED) {
       return;
     }
-    const toRemove = this.removeQueue.concat(transactions);
-    this.removeQueue = [];
-    let failed: string[] = [];
-    let numRemoved = 0;
-    if (this.connected) {
+
+    for (const txid of transactions) {
+      this.removeQueue.add(txid);
+    }
+  }
+
+  /** @asyncSafe */
+  async $removeTransactions(transactions: string[] = []): Promise<void> {
+    if (!config.REDIS.ENABLED) {
+      return;
+    }
+    for (const txid of transactions) {
+      this.removeQueue.add(txid);
+    }
+    await this.$flushQueuedMempoolTxRemovals();
+  }
+
+  // incrementally reconcile the redis cache with the in-memory mempool
+  // by scanning for cached txs no longer in the mempool and marking for deletion
+  // each invocation scans 1000 keys, cursor loops back to the start after completing a full scan
+  /** @asyncSafe */
+  private async $reconcileMempoolTransactions(): Promise<void> {
+    if (!config.REDIS.ENABLED || !this.connected || this.reconciliationInProgress || !memPool.isInSync()) {
+      return;
+    }
+
+    this.reconciliationInProgress = true;
+    try {
+      const result = await this.client.scan(this.reconciliationCursor, {
+        MATCH: 'mempool:tx:*',
+        COUNT: 1000
+      });
+      const mempool = memPool.getMempool();
+      let staleCount = 0;
+      this.reconciliationCursor = result.cursor.toString();
+
+      for (const key of result.keys) {
+        const txid = key.slice('mempool:tx:'.length);
+        if (!mempool[txid]) {
+          this.removeQueue.add(txid);
+          staleCount++;
+        }
+      }
+
+      if (staleCount) {
+        logger.debug(`Removing ${staleCount} stale transactions from the redis cache`);
+        void this.$removeTransactions();
+      }
+    } catch (e) {
+      logger.warn(`Failed to reconcile Redis mempool cache: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      this.reconciliationInProgress = false;
+    }
+  }
+
+  /** @asyncSafe */
+  private async $flushQueuedMempoolTxRemovals(): Promise<void> {
+    if (!this.connected || !this.removeQueue.size || this.removeQueueFlushInProgress) {
+      return;
+    }
+
+    this.removeQueueFlushInProgress = true;
+    const toRemove = Array.from(this.removeQueue);
+    this.removeQueue.clear();
+    try {
       const sliceLength = config.REDIS.BATCH_QUERY_BASE_SIZE;
       for (let i = 0; i < Math.ceil(toRemove.length / sliceLength); i++) {
         const slice = toRemove.slice(i * sliceLength, (i + 1) * sliceLength);
         try {
           await this.client.unlink(slice.map(txid => `mempool:tx:${txid}`));
-          numRemoved+= sliceLength;
           logger.debug(`Deleted ${slice.length} transactions from the Redis cache`);
         } catch (e) {
           logger.warn(`Failed to remove ${slice.length} transactions from Redis cache: ${e instanceof Error ? e.message : e}`);
-          failed = failed.concat(slice);
+          this.queueTransactionsForRemoval(slice);
         }
       }
-      // concat instead of replace, in case more txs have been added in the meantime
-      this.removeQueue = this.removeQueue.concat(failed);
-    } else {
-      this.removeQueue = this.removeQueue.concat(toRemove);
+    } finally {
+      this.removeQueueFlushInProgress = false;
     }
   }
 
+  /** @asyncSafe */
   async $setRbfEntry(type: string, txid: string, value: any): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
@@ -222,6 +289,7 @@ class RedisCache {
     }
   }
 
+  /** @asyncSafe */
   async $removeRbfEntry(type: string, txid: string): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
@@ -238,6 +306,7 @@ class RedisCache {
     }
   }
 
+  /** @asyncSafe */
   private async $flushRbfQueues(): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
@@ -263,6 +332,7 @@ class RedisCache {
     }
   }
 
+  /** @asyncSafe */
   async $getBlocks(): Promise<BlockExtended[]> {
     if (!config.REDIS.ENABLED) {
       return [];
@@ -280,6 +350,7 @@ class RedisCache {
     }
   }
 
+  /** @asyncSafe */
   async $getBlockSummaries(): Promise<BlockSummary[]> {
     if (!config.REDIS.ENABLED) {
       return [];
@@ -297,7 +368,8 @@ class RedisCache {
     }
   }
 
-  async $getMempool(): Promise<{ [txid: string]: MempoolTransactionExtended }> {
+  /** @asyncSafe */
+  async $getMempool(validTxids?: Set<string>): Promise<{ [txid: string]: MempoolTransactionExtended }> {
     if (!config.REDIS.ENABLED) {
       return {};
     }
@@ -308,7 +380,9 @@ class RedisCache {
     const start = Date.now();
     const mempool = {};
     try {
-      const mempoolList = await this.scanKeys<MempoolTransactionExtended>('mempool:tx:*');
+      const mempoolList = validTxids?.size
+        ? await this.loadKeys<MempoolTransactionExtended>('mempool:tx:*', Array.from(validTxids))
+        : await this.scanKeys<MempoolTransactionExtended>('mempool:tx:*');
       for (const tx of mempoolList) {
         mempool[tx.key] = tx.value;
       }
@@ -320,6 +394,7 @@ class RedisCache {
     return {};
   }
 
+  /** @asyncSafe */
   async $getRbfEntries(type: string): Promise<any[]> {
     if (!config.REDIS.ENABLED) {
       return [];
@@ -337,14 +412,15 @@ class RedisCache {
     }
   }
 
-  async $loadCache(): Promise<void> {
+  /** @asyncUnsafe */
+  async $loadCache(validTxids?: Set<string>): Promise<void> {
     if (!config.REDIS.ENABLED) {
       return;
     }
     logger.info('Restoring mempool and blocks data from Redis cache');
 
     // Load mempool
-    const loadedMempool = await this.$getMempool();
+    const loadedMempool = await this.$getMempool(validTxids);
     this.inflateLoadedTxs(loadedMempool);
     // Load rbf data
     const rbfTxs = await this.$getRbfEntries('tx');
@@ -385,12 +461,14 @@ class RedisCache {
     }
   }
 
+  /** @asyncUnsafe */
   private async scanKeys<T>(pattern): Promise<{ key: string, value: T }[]> {
     logger.info(`loading Redis entries for ${pattern}`);
     let keys: string[] = [];
     const result: { key: string, value: T }[] = [];
     const patternLength = pattern.length - 1;
     let count = 0;
+    /** @asyncUnsafe */
     const processValues = async (keys): Promise<void> => {
       const values = await this.client.MGET(keys);
       for (let i = 0; i < values.length; i++) {
@@ -413,6 +491,29 @@ class RedisCache {
     }
     if (keys.length) {
       await processValues(keys);
+    }
+    return result;
+  }
+
+  /** @asyncUnsafe */
+  private async loadKeys<T>(pattern, keys: string[]): Promise<{ key: string, value: T }[]> {
+    const prefix = pattern.slice(0, -1);
+    const result: { key: string, value: T }[] = [];
+    let count = 0;
+    /** @asyncUnsafe */
+    const processValues = async (slice: string[]): Promise<void> => {
+      const values = await this.client.MGET(slice.map(key => `${prefix}${key}`));
+      for (let i = 0; i < values.length; i++) {
+        if (values[i]) {
+          result.push({ key: slice[i], value: JSON.parse(values[i]) });
+          count++;
+        }
+      }
+      logger.info(`loaded ${count} entries from Redis cache`);
+    };
+    for (let i = 0; i < Math.ceil(keys.length / 10000); i++) {
+      const slice = keys.slice(i * 10000, (i + 1) * 10000);
+      await processValues(slice);
     }
     return result;
   }

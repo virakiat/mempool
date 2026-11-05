@@ -1,14 +1,15 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { CpfpInfo, OptimizedMempoolStats, AddressInformation, LiquidPegs, ITranslators, PoolStat, BlockExtended, TransactionStripped, RewardStats, AuditScore, BlockSizesAndWeights,
-  RbfTree, BlockAudit, CurrentPegs, AuditStatus, FederationAddress, FederationUtxo, RecentPeg, PegsVolume, AccelerationInfo, TestMempoolAcceptResult, WalletAddress, SubmitPackageResult } from '../interfaces/node-api.interface';
-import { BehaviorSubject, Observable, catchError, filter, map, of, shareReplay, take, tap } from 'rxjs';
+  RbfTree, BlockAudit, CurrentPegs, AuditStatus, FederationAddress, FederationUtxo, RecentPeg, PegsVolume, AccelerationInfo, TestMempoolAcceptResult, WalletAddress, Treasury, SubmitPackageResult, ChainTip, StaleTip } from '@interfaces/node-api.interface';
+import { BehaviorSubject, Observable, catchError, filter, map, of, shareReplay, switchMap, take, tap } from 'rxjs';
 import { StateService } from '@app/services/state.service';
 import { Transaction } from '@interfaces/electrs.interface';
 import { Conversion } from '@app/services/price.service';
 import { StorageService } from '@app/services/storage.service';
 import { WebsocketResponse } from '@interfaces/websocket.interface';
 import { TxAuditStatus } from '@components/transaction/transaction.component';
+import { MinersService } from '@app/services/miners.service';
 
 @Injectable({
   providedIn: 'root'
@@ -24,7 +25,8 @@ export class ApiService {
   constructor(
     private httpClient: HttpClient,
     private stateService: StateService,
-    private storageService: StorageService
+    private storageService: StorageService,
+    private minersService: MinersService,
   ) {
     this.apiBaseUrl = ''; // use relative URL by default
     if (!stateService.isBrowser) { // except when inside AU SSR process
@@ -168,6 +170,16 @@ export class ApiService {
     return this.httpClient.get<RbfTree[]>(this.apiBaseUrl + this.apiBasePath + '/api/v1/' + (fullRbf ? 'fullrbf/' : '') + 'replacements/' + (after || ''));
   }
 
+  getChainTips$(): Observable<ChainTip[]> {
+    return this.httpClient.get<ChainTip[]>(this.apiBaseUrl + this.apiBasePath + '/api/v1/chain-tips');
+  }
+
+  getStaleTips$(height?: number): Observable<StaleTip[]> {
+    return this.httpClient.get<StaleTip[]>(this.apiBaseUrl + this.apiBasePath + '/api/v1/stale-tips' + (height !== undefined ? `/${height}` : ``)).pipe(
+      switchMap((staleTips) => this.minersService.applyStaleTipsMinerDetails$(staleTips))
+    );
+  }
+
   liquidPegs$(): Observable<CurrentPegs> {
     return this.httpClient.get<CurrentPegs>(this.apiBaseUrl + this.apiBasePath + '/api/v1/liquid/pegs');
   }
@@ -229,7 +241,7 @@ export class ApiService {
   }
 
   listFeaturedAssets$(network: string = 'liquid'): Observable<any[]> {
-    if (network === 'liquid') return this.httpClient.get<any[]>(this.apiBaseUrl + '/api/v1/assets/featured');
+    if (network === 'liquid') {return this.httpClient.get<any[]>(this.apiBaseUrl + '/api/v1/assets/featured');}
     return of([]);
   }
 
@@ -278,7 +290,7 @@ export class ApiService {
         return response;
       })
     );
-  }  
+  }
 
   getPoolStats$(slug: string): Observable<PoolStat> {
     return this.httpClient.get<PoolStat>(this.apiBaseUrl + this.apiBasePath + `/api/v1/mining/pool/${slug}`)
@@ -300,6 +312,8 @@ export class ApiService {
     return this.httpClient.get<BlockExtended[]>(
         this.apiBaseUrl + this.apiBasePath + `/api/v1/mining/pool/${slug}/blocks` +
         (fromHeight !== undefined ? `/${fromHeight}` : '')
+      ).pipe(
+        switchMap((blocks) => this.minersService.applyBlocksMinerDetails$(blocks))
       );
   }
 
@@ -307,11 +321,15 @@ export class ApiService {
     return this.httpClient.get<BlockExtended[]>(
       this.apiBaseUrl + this.apiBasePath + `/api/v1/blocks` +
       (from !== undefined ? `/${from}` : ``)
+    ).pipe(
+      switchMap((blocks) => this.minersService.applyBlocksMinerDetails$(blocks))
     );
   }
 
   getBlock$(hash: string): Observable<BlockExtended> {
-    return this.httpClient.get<BlockExtended>(this.apiBaseUrl + this.apiBasePath + '/api/v1/block/' + hash);
+    return this.httpClient.get<BlockExtended>(this.apiBaseUrl + this.apiBasePath + '/api/v1/block/' + hash).pipe(
+      switchMap((block) => this.minersService.applyBlockMinerDetails$(block))
+    );
   }
 
   getBlockDataFromTimestamp$(timestamp: number): Observable<any> {
@@ -389,6 +407,13 @@ export class ApiService {
     );
   }
 
+  getHistoricalTxCountByFlags$(interval: string, bucketSize: string, op?: string, mask?: string) : Observable<HttpResponse<any[]>> {
+    return this.httpClient.get<any[]>(
+      this.apiBaseUrl + this.apiBasePath + `/api/v1/goggles/${interval}/${bucketSize}` +
+      (op !== undefined && mask !== undefined ? `/${op}/${mask}` : ''), { observe: 'response' }
+    );
+  }
+
   getBlockAudit$(hash: string) : Observable<BlockAudit> {
     this.setBlockAuditLoaded(hash);
     return this.httpClient.get<BlockAudit>(
@@ -420,7 +445,7 @@ export class ApiService {
   }
 
   getEnterpriseInfo$(name: string): Observable<any> {
-    return this.httpClient.get<any>(this.apiBaseUrl + this.apiBasePath + `/api/v1/services/enterprise/info/` + name);
+    return this.httpClient.get<any>(this.apiBaseUrl + `/api/v1/services/enterprise/info/` + name);
   }
 
   getChannelByTxIds$(txIds: string[]): Observable<any[]> {
@@ -432,7 +457,7 @@ export class ApiService {
   }
 
   lightningSearch$(searchText: string): Observable<{ nodes: any[], channels: any[] }> {
-    let params = new HttpParams().set('searchText', searchText);
+    const params = new HttpParams().set('searchText', searchText);
     // Don't request the backend if searchText is less than 3 characters
     if (searchText.length < 3) {
       return of({ nodes: [], channels: [] });
@@ -523,6 +548,12 @@ export class ApiService {
     );
   }
 
+  getTreasuries$(): Observable<Treasury[]> {
+    return this.httpClient.get<Treasury[]>(
+      this.apiBaseUrl + this.apiBasePath + `/api/v1/treasuries`
+    );
+  }
+
   getWallet$(walletName: string): Observable<Record<string, WalletAddress>> {
     return this.httpClient.get<Record<string, WalletAddress>>(
       this.apiBaseUrl + this.apiBasePath + `/api/v1/wallet/${walletName}`
@@ -563,6 +594,14 @@ export class ApiService {
 
   logAccelerationRequest$(txid: string): Observable<any> {
     return this.httpClient.post(this.apiBaseUrl + this.apiBasePath + '/api/v1/acceleration/request/' + txid, '');
+  }
+
+  getPrevouts$(outpoints: {txid: string; vout: number}[]): Observable<any> {
+    return this.httpClient.post(this.apiBaseUrl + this.apiBasePath + '/api/v1/prevouts', outpoints);
+  }
+
+  getCpfpLocalTx$(tx: any[]): Observable<CpfpInfo[]> {
+    return this.httpClient.post<CpfpInfo[]>(this.apiBaseUrl + this.apiBasePath + '/api/v1/cpfp', tx);
   }
 
   // Cache methods

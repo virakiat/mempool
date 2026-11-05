@@ -5,6 +5,7 @@ import { BlockExtended } from '../../mempool.interfaces';
 import axios from 'axios';
 import mempool from '../mempool';
 import websocketHandler from '../websocket-handler';
+import { Common } from '../common';
 
 type MyAccelerationStatus = 'requested' | 'accelerating' | 'done';
 
@@ -46,8 +47,11 @@ class AccelerationApi {
   private websocketConnected: boolean = false;
   private onDemandPollingEnabled = !config.MEMPOOL_SERVICES.ACCELERATIONS;
   private apiPath = config.MEMPOOL.OFFICIAL ? (config.MEMPOOL_SERVICES.API + '/accelerator/accelerations') : (config.EXTERNAL_DATA_SERVER.MEMPOOL_API + '/accelerations');
+  private websocketPath = config.MEMPOOL_SERVICES?.API ? `${config.MEMPOOL_SERVICES.API.replace('https://', 'wss://').replace('http://', 'ws://')}/accelerator/ws` : '/';
   private _accelerations: Record<string, Acceleration> = {};
   private lastPoll = 0;
+  private lastPing = Date.now();
+  private lastPong = Date.now();
   private forcePoll = false;
   private myAccelerations: Record<string, { status: MyAccelerationStatus, added: number, acceleration?: Acceleration }> = {};
 
@@ -71,6 +75,7 @@ class AccelerationApi {
     this.forcePoll = true;
   }
 
+  /** @asyncSafe */
   private async $fetchAccelerations(): Promise<Acceleration[] | null> {
     try {
       const response = await axios.get(this.apiPath, { responseType: 'json', timeout: 10000 });
@@ -235,6 +240,7 @@ class AccelerationApi {
     }
   }
 
+  /** @asyncSafe */
   public async connectWebsocket(): Promise<void> {
     if (this.startedWebsocketLoop) {
       return;
@@ -242,18 +248,23 @@ class AccelerationApi {
     while (this.useWebsocket) {
       this.startedWebsocketLoop = true;
       if (!this.ws) {
-        this.ws = new WebSocket(`${config.MEMPOOL_SERVICES.API.replace('https://', 'ws://').replace('http://', 'ws://')}/accelerator/ws`);
-        this.websocketConnected = true;
+        this.ws = new WebSocket(this.websocketPath);
+        this.lastPing = 0;
 
         this.ws.on('open', () => {
-          logger.info('Acceleration websocket opened');
+          logger.info(`Acceleration websocket opened to ${this.websocketPath}`);
+          this.websocketConnected = true;
           this.ws?.send(JSON.stringify({
             'watch-accelerations': true
           }));
         });
 
         this.ws.on('error', (error) => {
-          logger.err('Acceleration websocket error: ' + error);
+          let errMsg = `Acceleration websocket error on ${this.websocketPath}: ${error['code']}`;
+          if (error['errors']) {
+            errMsg += ' - ' + error['errors'].join(' - ');
+          }
+          logger.err(errMsg);
           this.ws = null;
           this.websocketConnected = false;
         });
@@ -266,14 +277,47 @@ class AccelerationApi {
 
         this.ws.on('message', (data, isBinary) => {
           try {
-            const parsedMsg = JSON.parse((isBinary ? data : data.toString()) as string);
+            const msg = (isBinary ? data : data.toString()) as string;
+            const parsedMsg = msg?.length ? JSON.parse(msg) : null;
             this.handleWebsocketMessage(parsedMsg);
           } catch (e) {
             logger.warn('Failed to parse acceleration websocket message: ' + (e instanceof Error ? e.message : e));
           }
         });
+
+        this.ws.on('ping', () => {
+          logger.debug('received ping from acceleration websocket server');
+        });
+
+        this.ws.on('pong', () => {
+          logger.debug('received pong from acceleration websocket server');
+          this.lastPong = Date.now();
+        });
+      } else if (this.websocketConnected) {
+        if (this.lastPing && this.lastPing > this.lastPong && (Date.now() - this.lastPing > 10000)) {
+          logger.warn('No pong received within 10 seconds, terminating connection');
+          try {
+            this.ws?.terminate();
+          } catch (e) {
+            logger.warn('failed to terminate acceleration websocket connection: ' + (e instanceof Error ? e.message : e));
+          } finally {
+            this.ws = null;
+            this.websocketConnected = false;
+            this.lastPing = 0;
+          }
+        } else if (!this.lastPing || (Date.now() - this.lastPing > 30000)) {
+          logger.debug('sending ping to acceleration websocket server');
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            try {
+              this.ws?.ping();
+              this.lastPing = Date.now();
+            } catch (e) {
+              logger.warn('failed to send ping to acceleration websocket server: ' + (e instanceof Error ? e.message : e));
+            }
+          }
+        }
       }
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await Common.sleep$(5000);
     }
   }
 }

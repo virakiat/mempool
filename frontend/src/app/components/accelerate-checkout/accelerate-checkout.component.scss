@@ -1,3 +1,7 @@
+hr {
+  border-color: var(--secondary)
+}
+
 .close-button {
   position: absolute;
   top: 0.5em;
@@ -8,11 +12,32 @@
   color: var(--green)
 }
 
+.accelerate-checkout-inner {
+  &.input-disabled {
+    pointer-events: none;
+    opacity: 0.75;
+  }
+}
+
 .paymentMethod {
   padding: 10px;
   background-color: var(--secondary);
   border-radius: 10px;
   cursor: pointer;
+}
+
+.purple-icon {
+  display: inline-block;
+  background-color: var(--tertiary);
+  filter: brightness(1.3);
+  -webkit-mask-image: url(/resources/mempool-accelerator-sparkles-light.svg);
+  mask-image: url(/resources/mempool-accelerator-sparkles-light.svg);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 .default-slot:not(:only-child) {
@@ -38,15 +63,15 @@
     .rate {
       font-size: 0.9em;
       .symbol {
-        color: white;
+        color: var(--fg);
       }
     }
   }
 }
 
 .btn-border {
-  border: solid 1px black;
-  background-color: #0c4a87;
+  border: solid 1px color-mix(in srgb, var(--primary) 68%, black);
+  background-color: color-mix(in srgb, var(--primary) 77%, black);
 }
 
 .feerate.active {
@@ -142,10 +167,25 @@
   flex-direction: row;
   align-items: stretch;
   margin-top: 1em;
+
+  @media (min-width: 768px) {
+    min-height: 350px;
+  }
 }
 
 .payment-area {
   background: var(--bg);
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  padding-bottom: 1.25rem;
+}
+
+.payment-options {
+  display: flex;
+  flex-direction: row;
+  @media (max-width: 640px) {
+    flex-direction: column;
+  }
 }
 
 .col.pie {
@@ -160,11 +200,11 @@
 }
 
 .table-background {
-  background-color: var(--bg);
+  background-color: var(--stat-box-bg);
 }
 
 .checkout-text {
-  color: rgb(186, 186, 186);
+  color: var(--transparent-fg);
   font-size: 14px;
 }
 
@@ -182,6 +222,12 @@
 
   @media (max-width: 640px) {
     flex-direction: column;
+  }
+
+  &.row>* {
+    width: unset;
+    padding-left: unset;
+    padding-right: unset;
   }
 }
 
@@ -212,4 +258,21 @@
 }
 .apple-pay-button-white-with-line {
     -apple-pay-button-style: white-outline;
+}
+
+.btcpay-invoice {
+  display: flex;
+  height: 292px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  @media (max-width: 575px) {
+    height: 75px;
+    flex-direction: row;
+    gap: 5px;
+  }
+}
+
+.form-text {
+  display: block;
 }

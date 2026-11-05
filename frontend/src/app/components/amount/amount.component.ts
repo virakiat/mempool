@@ -8,6 +8,7 @@ import { Price } from '@app/services/price.service';
   templateUrl: './amount.component.html',
   styleUrls: ['./amount.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  standalone: false,
 })
 export class AmountComponent implements OnInit, OnDestroy {
   conversions$: Observable<any>;
@@ -24,8 +25,10 @@ export class AmountComponent implements OnInit, OnDestroy {
   @Input() addPlus = false;
   @Input() blockConversion: Price;
   @Input() forceBtc: boolean = false;
+  @Input() forceSats: boolean = false;
   @Input() ignoreViewMode: boolean = false;
   @Input() forceBlockConversion: boolean = false; // true = displays fiat price as 0 if blockConversion is undefined instead of falling back to conversions
+  @Input() unitStyle: any;
 
   constructor(
     private stateService: StateService,

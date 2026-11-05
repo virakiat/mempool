@@ -1,22 +1,40 @@
-import { NgModule } from '@angular/core';
+import { NgModule, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Routes, RouterModule, ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
+import { Routes, Router, RouterModule, ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
 import { MasterPageComponent } from '@components/master-page/master-page.component';
 import { SharedModule } from '@app/shared/shared.module';
+import { WalletAccessService } from '@app/services/wallet-access.service';
+import { Observable } from 'rxjs';
+import { take } from 'rxjs/operators';
 
 import { StartComponent } from '@components/start/start.component';
 import { PushTransactionComponent } from '@components/push-transaction/push-transaction.component';
 import { TestTransactionsComponent } from '@components/test-transactions/test-transactions.component';
-import { CalculatorComponent } from '@components/calculator/calculator.component';
 import { BlocksList } from '@components/blocks-list/blocks-list.component';
 import { RbfList } from '@components/rbf-list/rbf-list.component';
+import { RecentTransactionsList } from '@components/recent-transactions-list/recent-transactions-list.component';
+import { StaleList } from '@components/stale-list/stale-list.component';
+import { StratumList } from '@components/stratum/stratum-list/stratum-list.component';
 import { ServerHealthComponent } from '@components/server-health/server-health.component';
 import { ServerStatusComponent } from '@components/server-health/server-status.component';
-import { FaucetComponent } from '@components/faucet/faucet.component'
+import { FaucetComponent } from '@components/faucet/faucet.component';
+import { SimpleProofWidgetComponent } from '@components/simpleproof-widget/simpleproof-widget.component';
+import { SimpleProofCuboWidgetComponent } from '@components/simpleproof-widget/simpleproof-cubo-widget.component';
 
 const browserWindow = window || {};
 // @ts-ignore
 const browserWindowEnv = browserWindow.__env || {};
+
+function watchWalletRouteEnabled(): Observable<boolean> | boolean {
+  const router = inject(Router);
+  const access = inject(WalletAccessService);
+  const navigation = router.getCurrentNavigation();
+  const url = navigation ? router.serializeUrl(navigation.extractedUrl) : router.url;
+  if (!access.runsOn(access.networkOfUrl(url))) {
+    return false;
+  }
+  return access.walletAvailable$.pipe(take(1));
+}
 
 const routes: Routes = [
   {
@@ -45,6 +63,10 @@ const routes: Routes = [
         loadChildren: () => import('@components/about/about.module').then(m => m.AboutModule),
       },
       {
+        path: 'blocks/stale',
+        component: StaleList,
+      },
+      {
         path: 'blocks/:page',
         component: BlocksList,
       },
@@ -56,6 +78,20 @@ const routes: Routes = [
         path: 'rbf',
         component: RbfList,
       },
+      {
+        path: 'txs',
+        component: RecentTransactionsList,
+      },
+      ...(browserWindowEnv.STRATUM_ENABLED ? [{
+        path: 'stratum',
+        component: StartComponent,
+        children: [
+          {
+            path: '',
+            component: StratumList,
+          }
+        ]
+      }] : []),
       {
         path: 'terms-of-service',
         loadChildren: () => import('@components/terms-of-service/terms-of-service.module').then(m => m.TermsOfServiceModule),
@@ -81,6 +117,14 @@ const routes: Routes = [
         loadChildren: () => import('@components/block/block.module').then(m => m.BlockModule),
       },
       {
+        // canMatch, so when it fails the chunk never loads and the URL falls through.
+        // pathMatch 'full' leaves /wallet/:name to its own route.
+        path: 'wallet',
+        pathMatch: 'full',
+        canMatch: [watchWalletRouteEnabled],
+        loadChildren: () => import('@app/watch/watch.module').then(m => m.WatchModule),
+      },
+      {
         path: 'docs',
         loadChildren: () => import('@app/docs/docs.module').then(m => m.DocsModule),
         data: { preload: true },
@@ -93,11 +137,7 @@ const routes: Routes = [
         path: 'lightning',
         loadChildren: () => import('@app/lightning/lightning.module').then(m => m.LightningModule),
         data: { preload: browserWindowEnv && browserWindowEnv.LIGHTNING === true, networks: ['bitcoin'] },
-      },
-      {
-        path: 'tools/calculator',
-        component: CalculatorComponent
-      },
+      }
     ],
   }
 ];
@@ -126,8 +166,22 @@ if (window['__env']?.OFFICIAL_MEMPOOL_SPACE) {
         data: { networks: ['bitcoin'] },
         component: FaucetComponent,
       }]
-    })
+    });
   }
+}
+
+if (window['__env']?.customize?.dashboard?.widgets?.some(w => w.component ==='simpleproof')) {
+  routes[0].children.push({
+    path: 'sp/verified',
+    component: SimpleProofWidgetComponent,
+  });
+}
+
+if (window['__env']?.customize?.dashboard?.widgets?.some(w => w.component ==='simpleproof_cubo')) {
+  routes[0].children.push({
+    path: 'sp/cubo',
+    component: SimpleProofCuboWidgetComponent,
+  });
 }
 
 @NgModule({

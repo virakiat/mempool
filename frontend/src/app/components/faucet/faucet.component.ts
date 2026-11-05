@@ -11,7 +11,8 @@ import { HttpErrorResponse } from '@angular/common/http';
 @Component({
   selector: 'app-faucet',
   templateUrl: './faucet.component.html',
-  styleUrls: ['./faucet.component.scss']
+  styleUrls: ['./faucet.component.scss'],
+  standalone: false,
 })
 export class FaucetComponent implements OnInit, OnDestroy {
   loading = true;
@@ -24,7 +25,7 @@ export class FaucetComponent implements OnInit, OnDestroy {
     min: number; // minimum amount to request at once (in sats)
     max: number; // maximum amount to request at once
     address?: string; // faucet address
-    code: 'ok' | 'faucet_not_available' | 'faucet_maximum_reached' | 'faucet_too_soon';
+    code: 'ok' | 'faucet_not_available' | 'faucet_maximum_reached' | 'faucet_too_soon' | 'faucet_not_available_no_utxo';
   } | null = null;
   faucetForm: FormGroup;
 
@@ -173,12 +174,12 @@ export class FaucetComponent implements OnInit, OnDestroy {
   get amount() { return this.faucetForm.get('satoshis')!; }
   get invalidAmount() {
     const amount = this.faucetForm.get('satoshis')!;
-    return amount?.invalid && (amount.dirty || amount.touched)
+    return amount?.invalid && (amount.dirty || amount.touched);
   }
 
   get address() { return this.faucetForm.get('address')!; }
   get invalidAddress() {
     const address = this.faucetForm.get('address')!;
-    return address?.invalid && (address.dirty || address.touched)
+    return address?.invalid && (address.dirty || address.touched);
   }
 }

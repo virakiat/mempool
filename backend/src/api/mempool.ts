@@ -13,6 +13,7 @@ import { Acceleration } from './services/acceleration';
 import accelerationApi from './services/acceleration';
 import redisCache from './redis-cache';
 import blocks from './blocks';
+import { ClusterMempool } from '../cluster-mempool/cluster-mempool';
 
 class Mempool {
   private inSync: boolean = false;
@@ -21,8 +22,14 @@ class Mempool {
   private mempoolCandidates: { [txid: string ]: boolean } = {};
   private spendMap = new Map<string, MempoolTransactionExtended>();
   private recentlyDeleted: MempoolTransactionExtended[][] = []; // buffer of transactions deleted in recent mempool updates
-  private mempoolInfo: IBitcoinApi.MempoolInfo = { loaded: false, size: 0, bytes: 0, usage: 0, total_fee: 0,
-                                                    maxmempool: 300000000, mempoolminfee: Common.isLiquid() ? 0.00000100 : 0.00001000, minrelaytxfee: Common.isLiquid() ? 0.00000100 : 0.00001000 };
+  // txids confirmed in the most recent blocks applied from Bitcoin Core, newest first.
+  // With the esplora backend, blocks come from Core but the mempool txid list comes from electrs, which
+  // can still be indexing a block the backend has already applied; its stale list would re-add that block's transactions.
+  private recentlyMined: { hash: string, txids: Set<string> }[] = [];
+  // one block covers the normal case; two also covers a second block found before electrs catches up
+  private static readonly RECENTLY_MINED_BLOCKS = 2;
+  private mempoolInfo: IBitcoinApi.MempoolInfo;
+  public clusterMempool: ClusterMempool | null = null;
   private mempoolChangedCallback: ((newMempool: {[txId: string]: MempoolTransactionExtended; }, newTransactions: MempoolTransactionExtended[],
     deletedTransactions: MempoolTransactionExtended[][], accelerationDelta: string[]) => void) | undefined;
   private $asyncMempoolChangedCallback: ((newMempool: {[txId: string]: MempoolTransactionExtended; }, mempoolSize: number, newTransactions: MempoolTransactionExtended[],
@@ -39,16 +46,44 @@ class Mempool {
   private mempoolProtection = 0;
   private latestTransactions: any[] = [];
 
-  private ESPLORA_MISSING_TX_WARNING_THRESHOLD = 100; 
+  private ESPLORA_MISSING_TX_WARNING_THRESHOLD = 100;
   private SAMPLE_TIME = 10000; // In ms
   private timer = new Date().getTime();
   private missingTxCount = 0;
   private mainLoopTimeout: number = 120000;
+  private txPerSecondInterval: NodeJS.Timeout | null = null;
 
   public limitGBT = config.MEMPOOL.USE_SECOND_NODE_FOR_MINFEE && config.MEMPOOL.LIMIT_GBT;
 
   constructor() {
-    setInterval(this.updateTxPerSecond.bind(this), 1000);
+    // Initialize mempoolInfo here to avoid circular dependency issues
+    // Use config directly instead of Common.isLiquid() to break circular dependency
+    const isLiquid = config.MEMPOOL.NETWORK === 'liquid' || config.MEMPOOL.NETWORK === 'liquidtestnet';
+    this.mempoolInfo = {
+      loaded: false,
+      size: 0,
+      bytes: 0,
+      usage: 0,
+      total_fee: 0,
+      maxmempool: 300000000,
+      mempoolminfee: isLiquid ? 0.00000100 : 0.00001000,
+      minrelaytxfee: isLiquid ? 0.00000100 : 0.00001000
+    };
+    this.txPerSecondInterval = setInterval(this.updateTxPerSecond.bind(this), 1000);
+    if (config.MEMPOOL.CLUSTER_MEMPOOL) {
+      this.clusterMempool = new ClusterMempool(this.mempoolCache, this.accelerations);
+    }
+  }
+
+  /**
+   * Cleanup resources (timers, etc.)
+   * This should only be called when shutting down or in test teardown
+   */
+  public destroy(): void {
+    if (this.txPerSecondInterval) {
+      clearInterval(this.txPerSecondInterval);
+      this.txPerSecondInterval = null;
+    }
   }
 
   /**
@@ -90,6 +125,54 @@ class Mempool {
     return this.mempoolCache;
   }
 
+  /**
+   * Record the transactions confirmed in a block just applied from Bitcoin Core, so a stale mempool
+   * snapshot cannot add them back. A block that does not build on the last one recorded (a reorg)
+   * clears the record, so transactions returned to the mempool by the reorg can be added again.
+   * Only the esplora backend needs this: the others take blocks and the mempool from Core alike.
+   */
+  public setRecentlyMined(blockHash: string, previousBlockHash: string, txids: string[]): void {
+    if (config.MEMPOOL.BACKEND !== 'esplora') {
+      return;
+    }
+    if (this.recentlyMined.length && this.recentlyMined[0].hash !== previousBlockHash) {
+      this.recentlyMined = [];
+    }
+    this.recentlyMined.unshift({ hash: blockHash, txids: new Set(txids) });
+    this.recentlyMined.length = Math.min(this.recentlyMined.length, Mempool.RECENTLY_MINED_BLOCKS);
+  }
+
+  private isRecentlyMined(txid: string): boolean {
+    return this.recentlyMined.some(block => block.txids.has(txid));
+  }
+
+  /**
+   * Clear the record if its newest block is no longer in Core's active chain. This catches reorgs
+   * the block loop does not apply, such as one that leaves the height unchanged. Older recorded
+   * blocks are ancestors of the newest, so one check covers them all. An error also clears the
+   * record: at worst a stale snapshot re-adds mined transactions, never hides genuine ones.
+   *
+   * @asyncSafe
+   */
+  private async $clearRecentlyMinedIfOrphaned(): Promise<void> {
+    if (!this.recentlyMined.length) {
+      return;
+    }
+    const hash = this.recentlyMined[0].hash;
+    try {
+      const header: IBitcoinApi.Block = await bitcoinClient.getBlockHeader(hash, true);
+      if (header?.confirmations > 0) {
+        return;
+      }
+      logger.debug(`Block ${hash} is no longer in the active chain, clearing recently mined transactions`);
+    } catch (e) {
+      logger.debug(`Could not check whether block ${hash} is in the active chain, clearing recently mined transactions: ${e instanceof Error ? e.message : e}`);
+    }
+    if (this.recentlyMined[0]?.hash === hash) {
+      this.recentlyMined = [];
+    }
+  }
+
   public getSpendMap(): Map<string, MempoolTransactionExtended> {
     return this.spendMap;
   }
@@ -98,6 +181,7 @@ class Mempool {
     return this.spendMap.get(`${txid}:${index}`);
   }
 
+  /** @asyncUnsafe */
   public async $setMempool(mempoolData: { [txId: string]: MempoolTransactionExtended }) {
     this.mempoolCache = mempoolData;
     let count = 0;
@@ -128,6 +212,9 @@ class Mempool {
       await redisCache.$flushTransactions();
       logger.debug(`Finished migrating cache transactions in ${((Date.now() - redisTimer) / 1000).toFixed(2)} seconds`);
     }
+    if (config.MEMPOOL.CLUSTER_MEMPOOL) {
+      this.clusterMempool = new ClusterMempool(this.mempoolCache, this.accelerations);
+    }
     if (this.mempoolChangedCallback) {
       this.mempoolChangedCallback(this.mempoolCache, [], [], []);
     }
@@ -142,6 +229,7 @@ class Mempool {
     let done = false;
     let last_txid;
     const newTransactions: MempoolTransactionExtended[] = [];
+    await this.$clearRecentlyMinedIfOrphaned();
     loadingIndicators.setProgress('mempool', count / expectedCount * 100);
     while (!done) {
       try {
@@ -149,7 +237,7 @@ class Mempool {
         if (result) {
           for (const tx of result) {
             const extendedTransaction = transactionUtils.extendMempoolTransaction(tx);
-            if (!this.mempoolCache[extendedTransaction.txid]) {
+            if (!this.mempoolCache[extendedTransaction.txid] && !this.isRecentlyMined(extendedTransaction.txid)) {
               newTransactions.push(extendedTransaction);
               this.mempoolCache[extendedTransaction.txid] = extendedTransaction;
             }
@@ -179,6 +267,7 @@ class Mempool {
     return this.mempoolCandidates;
   }
 
+  /** @asyncUnsafe */
   public async $updateMemPoolInfo() {
     this.mempoolInfo = await this.$getMempoolInfo();
   }
@@ -208,6 +297,7 @@ class Mempool {
     return txTimes;
   }
 
+  /** @asyncUnsafe */
   public async $updateMempool(transactions: string[], accelerations: Record<string, Acceleration> | null, minFeeMempool: string[], minFeeTip: number, pollRate: number): Promise<void> {
     logger.debug(`Updating mempool...`);
 
@@ -257,7 +347,16 @@ class Mempool {
     }
 
     if (!loaded) {
-      const remainingTxids = transactions.filter(txid => !this.mempoolCache[txid]);
+      const uncachedTxids = transactions.filter(txid => !this.mempoolCache[txid]);
+      let remainingTxids = uncachedTxids.filter(txid => !this.isRecentlyMined(txid));
+      if (remainingTxids.length < uncachedTxids.length) {
+        // only consult Core when the record would hide something
+        await this.$clearRecentlyMinedIfOrphaned();
+        remainingTxids = uncachedTxids.filter(txid => !this.isRecentlyMined(txid));
+      }
+      if (remainingTxids.length < uncachedTxids.length) {
+        logger.debug(`Ignored ${uncachedTxids.length - remainingTxids.length} recently mined transactions in a stale mempool snapshot`);
+      }
       const sliceLength = config.ESPLORA.BATCH_QUERY_BASE_SIZE;
       for (let i = 0; i < Math.ceil(remainingTxids.length / sliceLength); i++) {
         const slice = remainingTxids.slice(i * sliceLength, (i + 1) * sliceLength);
@@ -347,6 +446,7 @@ class Mempool {
       for (const tx of deletedTransactions) {
         delete this.mempoolCache[tx.txid];
       }
+      redisCache.queueTransactionsForRemoval(deletedTransactions.map(tx => tx.txid));
     }
 
     const candidates = await this.getNextCandidates(minFeeMempool, minFeeTip, deletedTransactions);
@@ -358,6 +458,14 @@ class Mempool {
     const accelerationDelta = accelerations != null ? await this.updateAccelerations(accelerations) : [];
     if (accelerationDelta.length) {
       hasChange = true;
+    }
+
+    if (config.MEMPOOL.CLUSTER_MEMPOOL && (newTransactions.length || deletedTransactions.length || accelerationDelta.length)) {
+      this.clusterMempool?.applyMempoolChange({
+        added: newTransactions,
+        removed: deletedTransactions,
+        accelerations: this.getAccelerations(),
+      });
     }
 
     this.mempoolCacheDelta = Math.abs(transactions.length - newMempoolSize);
@@ -385,7 +493,7 @@ class Mempool {
     // Update Redis cache
     if (config.REDIS.ENABLED) {
       await redisCache.$flushTransactions();
-      await redisCache.$removeTransactions(deletedTransactions.map(tx => tx.txid));
+      await redisCache.$removeTransactions();
       await rbfCache.updateCache();
     }
 
@@ -411,7 +519,7 @@ class Mempool {
     }
   }
 
-  public async getNextCandidates(minFeeTransactions: string[], blockHeight: number, deletedTransactions: MempoolTransactionExtended[]): Promise<GbtCandidates | undefined> {
+  public getNextCandidates(minFeeTransactions: string[], blockHeight: number, deletedTransactions: MempoolTransactionExtended[]): GbtCandidates | undefined {
     if (this.limitGBT) {
       const deletedTxsMap = {};
       for (const tx of deletedTransactions) {

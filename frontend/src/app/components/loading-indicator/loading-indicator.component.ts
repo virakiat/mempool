@@ -7,7 +7,7 @@ import { WebsocketService } from '@app/services/websocket.service';
 @Component({
   selector: 'app-loading-indicator',
   templateUrl: './loading-indicator.component.html',
-  styleUrls: ['./loading-indicator.component.scss'],
+  standalone: false,
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class LoadingIndicatorComponent implements OnInit {

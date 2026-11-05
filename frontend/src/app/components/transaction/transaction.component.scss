@@ -191,7 +191,7 @@
 	}
 }
 
-.details-button, .flow-toggle, .accelerator-toggle {
+.details-button, .flow-toggle, .accelerator-toggle, .rbf-diff-toggle {
   margin-top: -5px;
   margin-left: 10px;
 	@media (min-width: 768px){
@@ -204,6 +204,16 @@
 .accelerator-toggle, .details-button {
   position: relative;
   bottom: -13px;
+}
+
+.cpfp-beta {
+  font-size: 10px;
+  padding: 3px 5px;
+}
+
+h2 .cpfp-beta {
+  margin-left: 5px;
+  vertical-align: super;
 }
 
 .subtitle-block {
@@ -223,18 +233,6 @@
       margin-top: 0;
       margin-bottom: 8px;
       margin-left: 8px;
-    }
-  }
-}
-
-.cpfp-details {
-  .txids {
-    width: 60%;
-  }
-
-  @media (max-width: 500px) {
-    .txids {
-      width: 40%;
     }
   }
 }
@@ -306,14 +304,6 @@
   width: 2.7em;
 }
 
-.pool-logo {
-  width: 15px;
-  height: 15px;
-  position: relative;
-  top: -1px;
-  margin-right: 2px;
-}
-
 .oobFees {
   color: #905cf4;
 }
@@ -321,4 +311,27 @@
 .disabled {
   opacity: 0.5;
   pointer-events: none;
+}
+
+.anchor {
+  scroll-margin-top: 105px;
+  @media (min-width: 564px) {
+    scroll-margin-top: 65px;
+  }
+}
+
+.duplicate-tx-alert {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  border-left: 3px solid var(--info);
+  margin-bottom: 1.5rem;
+
+  .icon-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--info);
+  }
 }

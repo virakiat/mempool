@@ -7,6 +7,8 @@ import logger from '../logger';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import * as https from 'https';
 import { Common } from '../api/common';
+import { PoolConnection } from 'mysql2/promise';
+import BlocksRepository from '../repositories/BlocksRepository';
 
 /**
  * Maintain the most recent version of pools-v2.json
@@ -16,9 +18,11 @@ class PoolsUpdater {
 
   lastRun: number = 0;
   currentSha: string | null = null;
+  recheck: { sha: string, fromHeight: number } | null = null;
   poolsUrl: string = config.MEMPOOL.POOLS_JSON_URL;
   treeUrl: string = config.MEMPOOL.POOLS_JSON_TREE_URL;
 
+  /** @asyncSafe */
   public async $startService(): Promise<void> {
     while ('Bitcoin is still alive') {
       try {
@@ -30,10 +34,15 @@ class PoolsUpdater {
     }
   }
 
+  /** @asyncSafe */
   public async updatePoolsJson(): Promise<void> {
-    if (['mainnet', 'testnet', 'signet'].includes(config.MEMPOOL.NETWORK) === false ||
+    if (['mainnet', 'testnet', 'signet', 'testnet4', 'regtest'].includes(config.MEMPOOL.NETWORK) === false ||
       config.MEMPOOL.ENABLED === false
     ) {
+      return;
+    }
+
+    if (this.recheck) {
       return;
     }
 
@@ -45,13 +54,13 @@ class PoolsUpdater {
     this.lastRun = now;
 
     try {
+      if (config.DATABASE.ENABLED === true) {
+        this.currentSha = await this.getShaFromDb();
+      }
+
       const githubSha = await this.fetchPoolsSha(); // Fetch pools-v2.json sha from github
       if (githubSha === null) {
         return;
-      }
-
-      if (config.DATABASE.ENABLED === true) {
-        this.currentSha = await this.getShaFromDb();
       }
 
       logger.debug(`pools-v2.json sha | Current: ${this.currentSha} | Github: ${githubSha}`, this.tag);
@@ -86,34 +95,60 @@ class PoolsUpdater {
         return;
       }
 
+      const previousSha = this.currentSha;
+      const recheckFromHeight = (await BlocksRepository.$mostRecentBlockHeight()) - 10;
+      const connection = await (await DB.getPool()).getConnection();
       try {
-        await DB.query('START TRANSACTION;');
-        await poolsParser.migratePoolsJson();
-        await this.updateDBSha(githubSha);
-        await DB.query('COMMIT;');
+        await connection.beginTransaction();
+        await this.updateDBSha(githubSha, connection);
+        const clearCache = await poolsParser.migratePoolsJson(connection);
+        await connection.commit();
+        if (clearCache) {
+          this.recheck = { sha: githubSha, fromHeight: recheckFromHeight };
+        }
       } catch (e) {
         logger.err(`Could not migrate mining pools, rolling back. Exception: ${JSON.stringify(e)}`, this.tag);
-        await DB.query('ROLLBACK;');
+        this.currentSha = previousSha;
+        await connection.rollback();
+        await DB.query(`UPDATE blocks SET definition_hash = ? WHERE definition_hash = ? AND height >= ?`, [previousSha, githubSha, recheckFromHeight]);
+        throw e;
+      } finally {
+        connection.release();
       }
       logger.info(`Mining pools-v2.json (${githubSha}) import completed`, this.tag);
 
     } catch (e) {
-      this.lastRun = now - 600; // Try again in 10 minutes
+      // fast-forward lastRun to 10 minutes before the next scheduled update
+      this.lastRun = now - Math.max(config.MEMPOOL.POOLS_UPDATE_DELAY - 600, 600);
       logger.err(`PoolsUpdater failed. Will try again in 10 minutes. Exception: ${JSON.stringify(e)}`, this.tag);
+    }
+  }
+
+  /** @asyncSafe */
+  public async $recheckBlocks(): Promise<void> {
+    if (!this.recheck) {
+      return;
+    }
+    try {
+      await poolsParser.$refreshStaleBlocks(this.recheck.sha, this.recheck.fromHeight);
+      this.recheck = null;
+    } catch (e) {
+      logger.err(`Could not recheck blocks after mining pools update, will retry. Reason: ${e instanceof Error ? e.message : e}`, this.tag);
     }
   }
 
   /**
    * Fetch our latest pools-v2.json sha from the db
    */
-  private async updateDBSha(githubSha: string): Promise<void> {
+  private async updateDBSha(githubSha: string, connection: PoolConnection): Promise<void> {
     this.currentSha = githubSha;
     if (config.DATABASE.ENABLED === true) {
       try {
-        await DB.query('DELETE FROM state where name="pools_json_sha"');
-        await DB.query(`INSERT INTO state VALUES('pools_json_sha', NULL, '${githubSha}')`);
+        await DB.query('DELETE FROM state where name="pools_json_sha"', undefined, 'debug', connection);
+        await DB.query(`INSERT INTO state VALUES('pools_json_sha', NULL, '${githubSha}')`, undefined, 'debug', connection);
       } catch (e) {
         logger.err('Cannot save github pools-v2.json sha into the db. Reason: ' + (e instanceof Error ? e.message : e), this.tag);
+        throw e;
       }
     }
   }
@@ -121,7 +156,7 @@ class PoolsUpdater {
   /**
    * Fetch our latest pools-v2.json sha from the db
    */
-  private async getShaFromDb(): Promise<string | null> {
+  public async getShaFromDb(): Promise<string | null> {
     try {
       const [rows]: any[] = await DB.query('SELECT string FROM state WHERE name="pools_json_sha"');
       return (rows.length > 0 ? rows[0].string : null);
@@ -133,6 +168,7 @@ class PoolsUpdater {
 
   /**
    * Fetch our latest pools-v2.json sha from github
+   * @asyncUnsafe
    */
   private async fetchPoolsSha(): Promise<string | null> {
     const response = await this.query(this.treeUrl);
@@ -151,6 +187,7 @@ class PoolsUpdater {
 
   /**
    * Http request wrapper
+   * @asyncUnsafe
    */
   private async query(path): Promise<any[] | undefined> {
     type axiosOptions = {

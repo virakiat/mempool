@@ -21,10 +21,11 @@ import { download, formatterXAxis, formatterXAxisLabel } from '@app/shared/graph
       z-index: 99;
     }
   `],
+  standalone: false,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class MempoolGraphComponent implements OnInit, OnChanges {
-  @Input() data: any[];
+  @Input() data: OptimizedMempoolStats[];
   @Input() filterSize = 100000;
   @Input() limitFilterFee = 1;
   @Input() hideCount: boolean = true;
@@ -36,6 +37,7 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
   @Input() showZoom = true;
   @Input() windowPreferenceOverride: string;
   @Input() isLoading: boolean;
+  @Input() error: any;
 
   mempoolVsizeFeesData: any;
   mempoolVsizeFeesOptions: EChartsOption;
@@ -71,7 +73,11 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
   }
 
   ngOnChanges(changes) {
-    if (!this.data) {
+    if (this.isLoading) {
+      return;
+    }
+    if (!this.data || (this.data && this.data.length === 0) || this.error) {
+      this.mountMessageOnChart();
       return;
     }
     this.isWidget = this.template === 'widget';
@@ -117,7 +123,7 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
     let feesArray: number[][] = [];
 
     let maxTier = 0;
-    for (let index = 37; index > -1; index--) {
+    for (let index = 38; index > -1; index--) {
       feesArray = [];
       mempoolStats.forEach((stats) => {
         if (stats.vsizes[index] >= this.filterSize) {
@@ -179,7 +185,7 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
               yAxis: '1000000',
               label: {
                 show: false,
-                color: '#ffffff',
+                color: 'var(--fg)',
               }
             }],
           },
@@ -280,7 +286,7 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
               progressPercentageText = `<div class="total-parcial-active">
                 <span class="progress-percentage">
                   ${formatNumber(progressPercentage, this.locale, '1.2-2')}
-                  <span class="symbol">%</span>
+                  <span class="symbol" style="color: #ffffffbb">%</span>
                 </span>
                 <span class="total-parcial-vbytes">
                   ${this.vbytesPipe.transform(sum, 2, 'vB', 'MvB', false)}
@@ -307,12 +313,12 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
               </td>
               <td class="total-progress-sum">
                 <span>
-                  ${(item.value[1] / 1_000_000).toFixed(2)} <span class="symbol">MvB</span>
+                  ${(item.value[1] / 1_000_000).toFixed(2)} <span class="symbol" style="color: #ffffffbb">MvB</span>
                 </span>
               </td>
               <td class="total-progress-sum">
                 <span>
-                  ${(totalValueArray[index] / 1_000_000).toFixed(2)} <span class="symbol">MvB</span>
+                  ${(totalValueArray[index] / 1_000_000).toFixed(2)} <span class="symbol" style="color: #ffffffbb">MvB</span>
                 </span>
               </td>
               <td class="total-progress-sum-bar">
@@ -392,7 +398,7 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
         bottom: 0,
         selectedDataBackground: {
           lineStyle: {
-            color: '#fff',
+            color: 'var(--fg)',
             opacity: 0.45,
           },
           areaStyle: {
@@ -454,6 +460,25 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
     };
   }
 
+  mountMessageOnChart() {
+    let errorMessage = $localize`:error.general-loading-data:Error loading data.`;
+    if (!this.error && this.data && this.data.length === 0) { // Empty array
+      errorMessage = $localize`No data to display yet. Try again later.`;
+    }
+
+    this.mempoolVsizeFeesOptions = {
+      title: {
+        textStyle: {
+          color: 'grey',
+          fontSize: 15
+        },
+        text: errorMessage,
+        left: 'center',
+        top: 'center',
+      },
+    };
+  }
+
   getTotalValues = (values: any) => {
     let totalValueTemp = 0;
     const totalValueArray = [];
@@ -466,7 +491,7 @@ export class MempoolGraphComponent implements OnInit, OnChanges {
       totalValue: totalValueTemp,
       totalValueArray: totalValueArray.reverse(),
     };
-  }
+  };
 
   orderLevels() {
     this.feeLevelsOrdered = [];

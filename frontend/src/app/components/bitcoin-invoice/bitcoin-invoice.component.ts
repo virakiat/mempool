@@ -1,56 +1,34 @@
-import { Component, EventEmitter, Input, OnChanges, OnDestroy, OnInit, Output, SimpleChanges } from '@angular/core';
-import { FormBuilder, FormGroup } from '@angular/forms';
+import { Component, EventEmitter, Input, OnChanges, OnDestroy, Output, SimpleChanges } from '@angular/core';
 import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
-import { ActivatedRoute } from '@angular/router';
-import { Subscription, of, timer } from 'rxjs';
-import { filter, repeat, retry, switchMap, take, tap } from 'rxjs/operators';
+import { Subscription, of, catchError } from 'rxjs';
+import { retry, tap } from 'rxjs/operators';
 import { ServicesApiServices } from '@app/services/services-api.service';
 
 @Component({
   selector: 'app-bitcoin-invoice',
   templateUrl: './bitcoin-invoice.component.html',
-  styleUrls: ['./bitcoin-invoice.component.scss']
+  styleUrls: ['./bitcoin-invoice.component.scss'],
+  standalone: false,
 })
-export class BitcoinInvoiceComponent implements OnInit, OnChanges, OnDestroy {
+export class BitcoinInvoiceComponent implements OnChanges, OnDestroy {
   @Input() invoice;
   @Input() redirect = true;
   @Input() minimal = false;
   @Output() completed = new EventEmitter();
 
-  paymentForm: FormGroup;
-  requestSubscription: Subscription | undefined;
   paymentStatusSubscription: Subscription | undefined;
   paymentStatus = 1; // 1 - Waiting for invoice | 2 - Pending payment | 3 - Payment completed
-  paramMapSubscription: Subscription | undefined;
-  invoiceSubscription: Subscription | undefined;
-  invoiceTimeout; // Wait for angular to load all the things before making a request
+  paymentErrorMessage: string = '';
 
   constructor(
-    private formBuilder: FormBuilder,
     private apiService: ServicesApiServices,
-    private sanitizer: DomSanitizer,
-    private activatedRoute: ActivatedRoute
+    private sanitizer: DomSanitizer
   ) { }
 
   ngOnDestroy() {
-    if (this.requestSubscription) {
-      this.requestSubscription.unsubscribe();
-    }
-    if (this.paramMapSubscription) {
-      this.paramMapSubscription.unsubscribe();
-    }
-    if (this.invoiceSubscription) {
-      this.invoiceSubscription.unsubscribe();
-    }
     if (this.paymentStatusSubscription) {
       this.paymentStatusSubscription.unsubscribe();
     }
-  }
-
-  ngOnInit(): void {
-    this.paymentForm = this.formBuilder.group({
-      'method': 'lightning'
-    });
   }
 
   ngOnChanges(changes: SimpleChanges): void {
@@ -72,22 +50,71 @@ export class BitcoinInvoiceComponent implements OnInit, OnChanges, OnDestroy {
     } else {
       this.paymentStatus = 4;
     }
-    this.paymentStatusSubscription = this.apiService.getPaymentStatus$(this.invoice.btcpayInvoiceId).pipe(
-      retry({ delay: () => timer(2000)}),
-      repeat({delay: 2000}),
-      filter((response) => response.status !== 204 && response.status !== 404),
-      take(1),
-    ).subscribe(() => {
-      this.paymentStatus = 3;
-      this.completed.emit();
-    });
+
+    this.monitorPendingInvoice();
   }
 
-  get availableMethods(): string[] {
-    return Object.keys(this.invoice?.addresses || {}).filter(k => k === 'BTC_LightningLike');
+  monitorPendingInvoice(): void {
+    if (!this.invoice) {
+      return;
+    }
+    if (this.paymentStatusSubscription) {
+      this.paymentStatusSubscription.unsubscribe();
+    }
+    this.paymentStatusSubscription = this.apiService.getPaymentStatus$(this.invoice.btcpayInvoiceId).pipe(
+      tap(result => {
+        if (result.status === 204) { // Manually trigger an error in that case so we can retry
+          throw result;
+        } else if (result.status === 200) { // Invoice settled
+          this.paymentStatus = 3;
+          this.completed.emit();
+        }
+      }),
+      catchError(err => {
+        if (err.status === 204 || err.status === 504) {
+          throw err; // Will trigger the retry
+        } else if (err.status === 400) {
+          this.paymentErrorMessage = 'Invoice has expired';
+        } else if (err.status === 404) {
+          this.paymentErrorMessage = 'Invoice is no longer valid';
+        }
+        this.paymentStatus = -1;
+        return of(null);
+      }),
+      retry({ delay: 1000 }),
+    ).subscribe();
   }
 
   bypassSecurityTrustUrl(text: string): SafeUrl {
     return this.sanitizer.bypassSecurityTrustUrl(text);
+  }
+
+  /**
+   * Builds a BIP21 payment URI string for QR code display.
+   *
+   * - If a BTC address is present, produces `bitcoin:<address>?amount=<btcDue>`
+   *   with an optional `&label=<itemDesc>` parameter when a description is set.
+   * - If a Lightning address is also present, appends `&lightning=<invoice>` to the
+   *   bitcoin URI, or falls back to a standalone `lightning:<invoice>` URI when no
+   *   on-chain address is available.
+   * - Returns an empty string when neither address type is present.
+   */
+  get qrCodeString(): string {
+    if (!this.invoice?.addresses || (!this.invoice.addresses.BTC && !this.invoice.addresses.BTC_LightningLike)) {
+      return '';
+    }
+
+    let str = '';
+    if (this.invoice.addresses.BTC) {
+      str = `bitcoin:${this.invoice.addresses.BTC}?amount=${this.invoice.btcDue}`;
+      if (this.invoice.itemDesc) {
+        str += `&label=${encodeURIComponent(this.invoice.itemDesc)}`;
+      }
+    }
+    if (this.invoice.addresses.BTC_LightningLike) {
+      str += `${str.length ? '&lightning=' : 'lightning:'}${this.invoice.addresses.BTC_LightningLike}`;
+    }
+
+    return str;
   }
 }

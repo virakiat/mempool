@@ -3,12 +3,13 @@ import { webSocket, WebSocketSubject } from 'rxjs/webSocket';
 import { WebsocketResponse } from '@interfaces/websocket.interface';
 import { StateService } from '@app/services/state.service';
 import { Transaction } from '@interfaces/electrs.interface';
-import { firstValueFrom, Subscription } from 'rxjs';
+import { firstValueFrom, of, Subscription } from 'rxjs';
 import { ApiService } from '@app/services/api.service';
-import { take } from 'rxjs/operators';
+import { catchError, take } from 'rxjs/operators';
 import { TransferState, makeStateKey } from '@angular/core';
 import { CacheService } from '@app/services/cache.service';
 import { uncompressDeltaChange, uncompressTx } from '@app/shared/common.utils';
+import { MinersService } from '@app/services/miners.service';
 
 const OFFLINE_RETRY_AFTER_MS = 2000;
 const OFFLINE_PING_CHECK_AFTER_MS = 30000;
@@ -33,10 +34,18 @@ export class WebsocketService {
   private isTrackingRbfSummary = false;
   private isTrackingAddress: string | false = false;
   private isTrackingAddresses: string[] | false = false;
+  private trackAddressesRequest = 0;
+  /**
+   * The track-addresses request each unanswered ping went with (null for the online check). The
+   * server answers a connection's messages in order, so each pong closes the oldest one.
+   */
+  private pendingPongs: (number | null)[] = [];
   private isTrackingAccelerations: boolean = false;
   private isTrackingWallet: boolean = false;
   private trackingWalletName: string;
+  private isTrackingStratum: string | number | false = false;
   private trackingMempoolBlock: number;
+  private trackingMempoolBlockNetwork: string;
   private stoppingTrackMempoolBlock: any | null = null;
   private latestGitCommit = '';
   private onlineCheckTimeout: number;
@@ -49,6 +58,7 @@ export class WebsocketService {
     private apiService: ApiService,
     private transferState: TransferState,
     private cacheService: CacheService,
+    private minersService: MinersService,
   ) {
     if (!this.stateService.isBrowser) {
       // @ts-ignore
@@ -96,6 +106,7 @@ export class WebsocketService {
     this.websocketSubject = webSocket<WebsocketResponse>(
       this.webSocketUrl.replace('{network}', this.network ? '/' + this.network : '')
     );
+    this.pendingPongs = [];
 
     this.startSubscription(retrying, hasInitData);
   }
@@ -134,13 +145,16 @@ export class WebsocketService {
             this.startTrackAddress(this.isTrackingAddress);
           }
           if (this.isTrackingAddresses) {
-            this.startTrackAddresses(this.isTrackingAddresses);
+            this.startTrackAddresses(this.isTrackingAddresses, this.trackAddressesRequest);
           }
           if (this.isTrackingAccelerations) {
             this.startTrackAccelerations();
           }
           if (this.isTrackingWallet) {
             this.startTrackingWallet(this.trackingWalletName);
+          }
+          if (this.isTrackingStratum !== false) {
+            this.startTrackStratum(this.isTrackingStratum);
           }
           this.stateService.connectionState$.next(2);
         }
@@ -191,9 +205,13 @@ export class WebsocketService {
     this.isTrackingAddress = false;
   }
 
-  startTrackAddresses(addresses: string[]) {
-    this.websocketSubject.next({ 'track-addresses': addresses });
+  /** Returns the request's number; a refusal is published on trackAddressesError$ with it. */
+  startTrackAddresses(addresses: string[], request = ++this.trackAddressesRequest): number {
+    // The ping's pong arrives with the reply to this request: a refusal, or nothing if accepted.
+    this.pendingPongs.push(request);
+    this.websocketSubject.next({ 'track-addresses': addresses, action: 'ping' });
     this.isTrackingAddresses = addresses;
+    return request;
   }
 
   stopTrackingAddresses() {
@@ -226,10 +244,11 @@ export class WebsocketService {
       clearTimeout(this.stoppingTrackMempoolBlock);
     }
     // skip duplicate tracking requests
-    if (force || this.trackingMempoolBlock !== block) {
+    if (force || this.trackingMempoolBlock !== block || this.network !== this.trackingMempoolBlockNetwork) {
       this.websocketSubject.next({ 'track-mempool-block': block });
       this.isTrackingMempoolBlock = true;
       this.trackingMempoolBlock = block;
+      this.trackingMempoolBlockNetwork = this.network;
       return true;
     }
     return false;
@@ -287,6 +306,18 @@ export class WebsocketService {
     }
   }
 
+  startTrackStratum(pool: number | string) {
+    this.websocketSubject.next({ 'track-stratum': pool });
+    this.isTrackingStratum = pool;
+  }
+
+  stopTrackStratum() {
+    if (this.isTrackingStratum) {
+      this.websocketSubject.next({ 'track-stratum': null });
+      this.isTrackingStratum = false;
+    }
+  }
+
   fetchStatistics(historicalDate: string) {
     this.websocketSubject.next({ historicalDate });
   }
@@ -317,6 +348,7 @@ export class WebsocketService {
     clearTimeout(this.onlineCheckTimeoutTwo);
 
     this.onlineCheckTimeout = window.setTimeout(() => {
+      this.pendingPongs.push(null);
       this.websocketSubject.next({action: 'ping'});
       this.onlineCheckTimeoutTwo = window.setTimeout(() => {
         if (!this.goneOffline) {
@@ -338,9 +370,14 @@ export class WebsocketService {
 
     if (response.blocks && response.blocks.length) {
       const blocks = response.blocks;
-      this.stateService.resetBlocks(blocks);
-      const maxHeight = blocks.reduce((max, block) => Math.max(max, block.height), this.stateService.latestBlockHeight);
-      this.stateService.updateChainTip(maxHeight);
+      this.minersService.applyBlocksMinerDetails$(blocks).pipe(
+        take(1),
+        catchError(() => of(blocks))
+      ).subscribe((mappedBlocks) => {
+        this.stateService.resetBlocks(mappedBlocks);
+        const maxHeight = mappedBlocks.reduce((max, block) => Math.max(max, block.height), this.stateService.latestBlockHeight);
+        this.stateService.updateChainTip(maxHeight);
+      });
     }
 
     if (response.tx) {
@@ -353,9 +390,14 @@ export class WebsocketService {
 
     if (response.block) {
       if (response.block.height === this.stateService.latestBlockHeight + 1) {
-        this.stateService.updateChainTip(response.block.height);
-        this.stateService.addBlock(response.block);
-        this.stateService.txConfirmed$.next([response.txConfirmed, response.block]);
+        this.minersService.applyBlockMinerDetails$(response.block).pipe(
+          take(1),
+          catchError(() => of(response.block))
+        ).subscribe((block) => {
+          this.stateService.updateChainTip(block.height);
+          this.stateService.addBlock(block);
+          this.stateService.txConfirmed$.next([response.txConfirmed, block]);
+        });
       } else if (response.block.height > this.stateService.latestBlockHeight + 1) {
         reinitBlocks = true;
       }
@@ -410,7 +452,9 @@ export class WebsocketService {
     }
 
     if (response.fees) {
-     this.stateService.recommendedFees$.next(response.fees); 
+      this.stateService.recommendedFees$.next({
+        ...response.fees,
+      });
     }
 
     if (response.backendInfo) {
@@ -441,6 +485,13 @@ export class WebsocketService {
 
     if (response['multi-address-transactions']) {
       this.stateService.multiAddressTransactions$.next(response['multi-address-transactions']);
+    }
+
+    if (response.pong) {
+      const request = this.pendingPongs.shift();
+      if (request && response['track-addresses-error']) {
+        this.stateService.trackAddressesError$.next(request);
+      }
     }
 
     if (response['block-transactions']) {
@@ -508,6 +559,14 @@ export class WebsocketService {
 
     if (response.previousRetarget !== undefined) {
       this.stateService.previousRetarget$.next(response.previousRetarget);
+    }
+
+    if (response.stratumJobs) {
+      this.stateService.stratumJobUpdate$.next({ state: response.stratumJobs });
+    }
+
+    if (response.stratumJob) {
+      this.stateService.stratumJobUpdate$.next({ job: response.stratumJob });
     }
 
     if (response['tomahawk']) {

@@ -3,6 +3,9 @@ import { Application, Request, Response } from 'express';
 import channelsApi from './channels.api';
 import { handleError } from '../../utils/api';
 
+const TXID_REGEX = /^[a-f0-9]{64}$/i;
+const MAX_CHANNEL_TXIDS = 150;
+
 class ChannelsRoutes {
   constructor() { }
 
@@ -23,7 +26,7 @@ class ChannelsRoutes {
       const channels = await channelsApi.$searchChannelsById(req.params.search);
       res.json(channels);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to search channels by id');
     }
   }
 
@@ -39,7 +42,7 @@ class ChannelsRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(channel);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get channel');
     }
   }
 
@@ -70,21 +73,30 @@ class ChannelsRoutes {
       res.header('X-Total-Count', channelsCount.toString());
       res.json(channels);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get channels for node');
     }
   }
 
   private async $getChannelsByTransactionIds(req: Request, res: Response): Promise<void> {
     try {
-      if (!Array.isArray(req.query.txId)) {
-        handleError(req, res, 400, 'Not an array');
+      if (!req.query.txId || typeof req.query.txId !== 'object') {
+        handleError(req, res, 400, 'invalid txId format');
+        return;
+      }
+      const requestedTxIds = Object.values(req.query.txId);
+      if (requestedTxIds.length > MAX_CHANNEL_TXIDS) {
+        handleError(req, res, 400, 'Too many txids requested');
         return;
       }
       const txIds: string[] = [];
-      for (const _txId in req.query.txId) {
-        if (typeof req.query.txId[_txId] === 'string') {
-          txIds.push(req.query.txId[_txId].toString());
+      for (const txid of requestedTxIds) {
+        if (typeof txid === 'string' && TXID_REGEX.test(txid)) {
+          txIds.push(txid);
         }
+      }
+      if (!txIds.length) {
+        res.json([]);
+        return;
       }
       const channels = await channelsApi.$getChannelsByTransactionId(txIds);
       const result: any[] = [];
@@ -108,7 +120,7 @@ class ChannelsRoutes {
 
       res.json(result);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get channels by transaction ids');
     }
   }
 
@@ -120,7 +132,7 @@ class ChannelsRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(channels);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get penalty closed channels');
     }
   }
 
@@ -133,7 +145,7 @@ class ChannelsRoutes {
       res.setHeader('Expires', new Date(Date.now() + 1000 * 60).toUTCString());
       res.json(channels);
     } catch (e) {
-      handleError(req, res, 500, e instanceof Error ? e.message : e);
+      handleError(req, res, 500, 'Failed to get channel geodata');
     }
   }
 
